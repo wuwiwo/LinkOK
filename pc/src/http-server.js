@@ -491,6 +491,17 @@ class HttpServer extends EventEmitter {
       paused: this.isPaused(),
       version: this.version,
       lanAddress: this.lanAddress(),
+      // 诊断用：PC Capture 下行是否卡在等 ACK。
+      // 用户报"电脑截图手机没收到"时，这一项能直接区分
+      // 「没发出去」/「发了但手机没回执」/「回执了但落盘失败」。
+      delivery: link
+        ? {
+            queued: link.queuedCaptures,
+            awaitingResultId: link.awaitingResult ? link.awaitingResult.id : null,
+            awaitingSinceMs: link.awaitingResult ? Date.now() - link.awaitingResult.startedAt : null,
+          }
+        : { queued: 0, awaitingResultId: null, awaitingSinceMs: null },
+      recentClipboard: this.clipboardLog ? this.clipboardLog.list(5) : [],
     });
   }
 

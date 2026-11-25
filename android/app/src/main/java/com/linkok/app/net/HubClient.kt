@@ -316,16 +316,35 @@ class HubClient(
             Log.w(TAG, "收到二进制帧但没有待接收的 capture")
             return
         }
-        val entry = chunks[id] ?: run {
-            Log.w(TAG, "分片缓冲缺失 id=$id")
+        val meta = pendingCaptureMeta
+        if (meta == null) {
+            Log.w(TAG, "分片缓冲缺失 meta id=$id")
             return
         }
+        val entry = chunks.getOrPut(id) { ByteArrayOutputStream() to 1 }
         entry.first.write(bytes.toByteArray())
 
-        val meta = pendingCaptureMeta
-        val expected = meta?.bytes ?: -1L
-        // 已知总大小时按大小判断完整；未知时先按「不再有后续 chunk」处理。
-        if (expected >= 0 && entry.first.size().toLong() >= expected) {
+        val received = entry.first.size().toLong()
+        // 以 Hub 声明的总字节数为准。
+        // 早先写成 `bytes ?: 0L`，一旦该字段解析失败就退化成 0，于是第一帧到达时
+        // `received >= 0` 恒真，立刻把**半张图**当成完整图收下 —— 结果是哈希不符、
+        // 被 finishCapture 丢弃，Stash 里什么都没落，界面上看起来就是"手机没收到"。
+        val expected = meta.bytes
+        if (expected <= 0) {
+            // 没有可信的总大小就不要提前收尾。等连接侧的超时兜底，
+            // 总比把半张图当完整图存下去强。
+            Log.w(TAG, "capture $id 没有有效字节数（$expected），暂不完成")
+            return
+        }
+        if (received > expected) {
+            Log.w(TAG, "capture $id 收到的字节数超过声明值（$received > $expected），丢弃")
+            chunks.remove(id)
+            pendingCaptureId = null
+            pendingCaptureMeta = null
+            sendCaptureResult(id, ok = false, reason = "overflow")
+            return
+        }
+        if (received == expected) {
             finishCapture(id, entry.first.toByteArray())
         }
     }

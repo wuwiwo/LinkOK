@@ -154,6 +154,15 @@ fun PairingScreen(
                 Spacer(Modifier.height(16.dp))
                 OutlinedButton(onClick = onCancel) { Text("取消") }
             }
+
+            // 配对页也显示版本：用户最容易卡在这一页，
+            // 如果版本只在设置页，就无从确认当前装的是哪一版。
+            Spacer(Modifier.height(32.dp))
+            Text(
+                text = "LinkOK ${com.linkok.app.BuildConfig.VERSION_NAME} · 构建 ${com.linkok.app.BuildConfig.BUILD_TIME}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

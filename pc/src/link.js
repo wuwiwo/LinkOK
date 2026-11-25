@@ -467,10 +467,12 @@ class Link extends EventEmitter {
       height: capture.height,
     });
 
-    /** @type {{id: string, sha256: string, timer: NodeJS.Timeout}} */
+    /** @type {{id: string, sha256: string, startedAt: number, timer: NodeJS.Timeout}} */
     const awaiting = {
       id,
       sha256,
+      // 记录起始时刻，供 /api/state 的 delivery 诊断展示"已经等了多久"。
+      startedAt: Date.now(),
       timer: setTimeout(() => {
         if (!this.awaitingResult || this.awaitingResult.id !== id) return;
         this.logger.warn(`no capture-result for ${id} after ${CAPTURE_RESULT_TIMEOUT_MS / 1000}s; moving on`);
