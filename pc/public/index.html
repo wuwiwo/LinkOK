@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>LinkOK</title>
+    <meta
+      name="description"
+      content="LinkOK 设置页：查看手机与这台电脑之间的连接、截图历史和配对状态。"
+    />
+    <!--
+      Token handoff. The Hub may take any ONE of these paths; the page supports
+      all three and needs no configuration:
+
+        1. Cookie (simplest, recommended): GET / sets
+           Set-Cookie: linkok_token=<token>; Path=/; HttpOnly; SameSite=Strict
+           The page's own fetch() is same-origin, so the browser attaches it.
+
+        2. Meta tag: inject a meta element named "linkok-token" whose content is
+           the raw token. Do it by replacing the </head> token below, not by
+           string-matching this comment.
+
+        3. Query string: link to /?token=<token>. The page moves it into
+           sessionStorage and strips it from the URL immediately.
+
+      When none of them is present the page still loads and explains that it has
+      no credential. See README.md for the full contract.
+    -->
+    <!-- linkok:head-end -->
+    <link rel="stylesheet" href="styles/tokens.css" />
+    <link rel="stylesheet" href="styles/app.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <div class="app">
+      <!-- M3 NavigationRail (surfaceContainer). Collapses to top tabs < 840px. -->
+      <nav class="rail" aria-label="主导航">
+        <a class="rail__brand" href="#/overview">
+          <span class="rail__wordmark">LinkOK</span>
+        </a>
+
+        <ul class="rail__nav">
+          <li>
+            <a class="rail__link" data-nav="overview" href="#/overview">
+              <span class="rail__indicator" data-icon="overview" aria-hidden="true"></span>
+              <span class="rail__label">概览</span>
+            </a>
+          </li>
+          <li>
+            <a class="rail__link" data-nav="history" href="#/history">
+              <span class="rail__indicator" data-icon="history" aria-hidden="true"></span>
+              <span class="rail__label">历史</span>
+            </a>
+          </li>
+          <li>
+            <a class="rail__link" data-nav="devices" href="#/devices">
+              <span class="rail__indicator" data-icon="devices" aria-hidden="true"></span>
+              <span class="rail__label">设备</span>
+            </a>
+          </li>
+          <li>
+            <a class="rail__link" data-nav="settings" href="#/settings">
+              <span class="rail__indicator" data-icon="settings" aria-hidden="true"></span>
+              <span class="rail__label">设置</span>
+            </a>
+          </li>
+        </ul>
+
+        <div class="rail__footer">
+          <span class="rail__meta" id="rail-meta">正在连接…</span>
+        </div>
+      </nav>
+
+      <main class="main" id="main" tabindex="-1">
+        <div class="content" id="view">
+          <p class="loading">正在读取状态…</p>
+        </div>
+      </main>
+    </div>
+
+    <!-- Transient confirmation. role=status so it is announced, not focused. -->
+    <div class="snackbar" id="snackbar" role="status" aria-live="polite" hidden>
+      <span class="snackbar__text" id="snackbar-text"></span>
+      <button class="snackbar__action" type="button" id="snackbar-action" hidden></button>
+    </div>
+
+    <div id="dialog-root"></div>
+
+    <!-- Classic deferred scripts, loaded in dependency order. No modules: the
+         page must also run straight off the filesystem for ?demo=1 review, and
+         Chrome refuses ES modules on file:// (CORS), while classic scripts are
+         allowed. All files share one global namespace, LinkOK. -->
+    <script src="js/icons.js" defer></script>
+    <script src="js/util.js" defer></script>
+    <script src="js/ui.js" defer></script>
+    <script src="js/qr.js" defer></script>
+    <script src="js/demo.js" defer></script>
+    <script src="js/api.js" defer></script>
+    <script src="js/views/overview.js" defer></script>
+    <script src="js/views/history.js" defer></script>
+    <script src="js/views/devices.js" defer></script>
+    <script src="js/views/settings.js" defer></script>
+    <script src="js/app.js" defer></script>
+  </body>
+</html>

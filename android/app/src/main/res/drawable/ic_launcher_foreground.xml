@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 桥：两座塔 + 一座弧 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,38h8v34h-8zM66,38h8v34h-8z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,44c0,-8 9,-14 20,-14s20,6 20,14h-7c0,-4 -6,-7 -13,-7s-13,3 -13,7z" />
+</vector>

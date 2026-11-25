@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LinkOK</string>
+    <string name="accessibility_label">LinkOK 剪贴板同步</string>
+    <string name="accessibility_description">用于把手机上复制的内容同步到电脑。关闭后，手机到电脑的剪贴板同步将停止，可以用快捷设置磁贴手动推送。</string>
+    <string name="tile_label">推送剪贴板</string>
+</resources>

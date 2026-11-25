@@ -1,0 +1,44 @@
+# ── 依赖与构建产物 ─────────────────────────────────────
+node_modules/
+.npm-cache/
+.gradle-home/
+.gradle/
+build/
+*.exe
+*.dll
+
+# Android
+android/local.properties
+android/.gradle/
+android/.kotlin/
+android/app/build/
+*.apk
+*.aab
+
+# 签名材料：绝不入库（含私钥）
+*.keystore
+*.jks
+*.p12
+*.pfx
+
+# ── 运行时数据（含 token、配对信息、截图）───────────────
+.pc-data/
+.pc-data2/
+.test-data/
+*.log
+tmp/
+.tmp*/
+
+# 测试残留
+.pipeprobe/
+.tmp-run/
+.tmp-shots/
+.seabuild/
+
+# ── 编辑器 ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.user
+*.suo
+.DS_Store
+Thumbs.db

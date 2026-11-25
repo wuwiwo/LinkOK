@@ -1,0 +1,1143 @@
+// LinkOK helper — integration probe (test tool, not part of the shipped helper).
+//
+// Why this exists: the build sandbox forbids *this* environment's child processes from
+// capturing another program's stdio through pipes (Process.Start with redirection fails with
+// EPERM on \\.\pipe\...). The shipped helper is unaffected — the Hub will spawn it with real
+// pipes — but it means the helper cannot be exercised interactively from PowerShell.
+//
+// So the probe talks to the helper over plain anonymous pipes (CreatePipe + CreateProcess with
+// STARTF_USESTDHANDLES), which the sandbox does allow, and drives a scripted scenario:
+//
+//   1. send {"cmd":"start"} and require {"evt":"ready"}
+//   2. write text to the clipboard from this process → require {"evt":"clipboard-text"}
+//   3. send set-clipboard-text → require NO clipboard-text (echo suppression)
+//   4. copy an image to the clipboard → require {"evt":"clipboard-image"} with a real file
+//   5. send set-clipboard-image → require NO clipboard-image (echo suppression)
+//   6. drop a PNG into the watched folder → require {"evt":"file-captured"}
+//   7. send show-qr and notify, then quit → require a clean exit
+//
+// Exit code 0 = every check passed.
+
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Windows.Forms;
+
+namespace LinkOK.Probe
+{
+    internal static class Program
+    {
+        private const uint CREATE_NO_WINDOW = 0x08000000;
+        private const int STARTF_USESTDHANDLES = 0x00000100;
+        private const uint STD_INPUT_HANDLE = 0xFFFFFFF6;
+        private const uint STD_OUTPUT_HANDLE = 0xFFFFFFF5;
+        private const uint STD_ERROR_HANDLE = 0xFFFFFFF4;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct STARTUPINFO
+        {
+            public int cb;
+            public string lpReserved;
+            public string lpDesktop;
+            public string lpTitle;
+            public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute;
+            public int dwFlags;
+            public short wShowWindow;
+            public short cbReserved2;
+            public IntPtr lpReserved2;
+            public IntPtr hStdInput;
+            public IntPtr hStdOutput;
+            public IntPtr hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_INFORMATION
+        {
+            public IntPtr hProcess;
+            public IntPtr hThread;
+            public int dwProcessId;
+            public int dwThreadId;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SECURITY_ATTRIBUTES
+        {
+            public int nLength;
+            public IntPtr lpSecurityDescriptor;
+            public bool bInheritHandle;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CreatePipe(out IntPtr read, out IntPtr write,
+            ref SECURITY_ATTRIBUTES attributes, int size);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool CreateProcess(string application, string commandLine,
+            IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles,
+            uint creationFlags, IntPtr environment, string currentDirectory,
+            ref STARTUPINFO startupInfo, out PROCESS_INFORMATION processInfo);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool ReadFile(IntPtr file, byte[] buffer, int bytesToRead,
+            out int bytesRead, IntPtr overlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool WriteFile(IntPtr file, byte[] buffer, int bytesToWrite,
+            out int bytesWritten, IntPtr overlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool PeekNamedPipe(IntPtr pipe, IntPtr buffer, int bufferSize,
+            IntPtr bytesRead, out int totalAvailable, IntPtr bytesLeft);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern int WaitForSingleObject(IntPtr handle, int milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetExitCodeProcess(IntPtr process, out int exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateProcess(IntPtr process, int exitCode);
+
+        private static IntPtr _stdinWrite;
+        private static IntPtr _stdoutRead;
+        private static IntPtr _stderrRead;
+        private static IntPtr _process;
+
+        private static readonly List<string> Events = new List<string>();
+        private static readonly List<string> StderrLines = new List<string>();
+        private static readonly StringBuilder StdoutRaw = new StringBuilder();
+        private static int _failures;
+
+        private static string _root;
+        private static string _shotDir;
+        private static string _logFile;
+
+        [STAThread]
+        private static int Main(string[] args)
+        {
+            if (args.Length > 0 && args[0] == "--single-instance")
+            {
+                // Hold a first helper alive through real pipes, then start a second copy and
+                // report its exit code. Start-Process cannot express this (redirection is
+                // blocked in this sandbox), so both launches go through CreateProcess.
+                _shotDir = Path.Combine(Path.GetTempPath(), "linkok-si-" + Guid.NewGuid().ToString("N").Substring(0, 6));
+                Directory.CreateDirectory(_shotDir);
+                _logFile = Path.Combine(_shotDir, "helper.log");
+                string siExe = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "linkok-helper.exe"));
+
+                KillStrayHelpers();
+                if (!Launch(siExe)) { Console.WriteLine("FAIL first launch"); return 1; }
+                Send("{\"cmd\":\"start\"}");
+                bool ready = WaitFor(delegate(string e) { return e.Contains("\"evt\":\"ready\""); }, 5000) != null;
+                Console.WriteLine("first instance ready = " + ready);
+
+                int secondExit = LaunchAndWaitExit(siExe);
+                Console.WriteLine("second instance exit code = " + secondExit + " (expected 2 = single-instance guard)");
+
+                bool firstAlive = WaitForSingleObject(_process, 0) != 0;
+                Console.WriteLine("first instance still alive = " + firstAlive);
+
+                Send("{\"cmd\":\"quit\"}");
+                WaitForSingleObject(_process, 4000);
+                Shutdown();
+
+                bool ok = secondExit == 2 && firstAlive && ready;
+                Console.WriteLine(ok ? "SINGLE-INSTANCE: PASS" : "SINGLE-INSTANCE: FAIL");
+                return ok ? 0 : 1;
+            }
+            if (args.Length > 0 && args[0] == "--qr-mimic")
+            {
+                // Replicate the helper's exact startup: EnableVisualStyles, a bare
+                // Application.Run(), the form created through HiddenInvoker. If this is blank
+                // while --qr-live is not, the difference is in the helper's path, not the form.
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+
+                LinkOK.Helper.QrForm holder = null;
+                System.Windows.Forms.Timer kick = new System.Windows.Forms.Timer();
+                kick.Interval = 300;
+                kick.Tick += delegate
+                {
+                    kick.Stop();
+                    HiddenProbe.Invoke(delegate
+                    {
+                        holder = new LinkOK.Helper.QrForm("linkok://pair?host=192.168.1.100&port=8787&code=AB12CD&fp=0123456789abcdef");
+                        holder.ShowCentered();
+                    });
+                    System.Windows.Forms.Timer shotTimer = new System.Windows.Forms.Timer();
+                    shotTimer.Interval = 2000;
+                    shotTimer.Tick += delegate
+                    {
+                        shotTimer.Stop();
+                        NativeRect wr;
+                        GetWindowRect(holder.Handle, out wr);
+                        int w = wr.Right - wr.Left, h = wr.Bottom - wr.Top;
+                        using (Bitmap target = new Bitmap(w, h))
+                        {
+                            using (Graphics g = Graphics.FromImage(target))
+                            {
+                                IntPtr hdc = g.GetHdc();
+                                PrintWindow(holder.Handle, hdc, 2);
+                                g.ReleaseHdc(hdc);
+                            }
+                            target.Save(Path.Combine(Path.GetTempPath(), "qr-mimic.png"), ImageFormat.Png);
+                        }
+                        Console.WriteLine("mimic captured " + w + "x" + h);
+                        Application.Exit();
+                    };
+                    shotTimer.Start();
+                };
+                kick.Start();
+                Application.Run();
+                return 0;
+            }
+            if (args.Length > 0 && args[0] == "--qr-live")
+            {
+                // Show the form under a REAL message loop, then capture it. This separates
+                // "the form never paints when shown" from "this session cannot capture GDI".
+                string lp = "linkok://pair?host=192.168.1.100&port=8787&code=AB12CD&fp=0123456789abcdef";
+                LinkOK.Helper.QrForm form = new LinkOK.Helper.QrForm(lp);
+                form.Shown += delegate
+                {
+                    System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+                    timer.Interval = 1200;
+                    timer.Tick += delegate
+                    {
+                        timer.Stop();
+                        try
+                        {
+                            NativeRect wr;
+                            GetWindowRect(form.Handle, out wr);
+                            int w = wr.Right - wr.Left, h = wr.Bottom - wr.Top;
+                            using (Bitmap target = new Bitmap(w, h))
+                            {
+                                using (Graphics g = Graphics.FromImage(target))
+                                {
+                                    IntPtr hdc = g.GetHdc();
+                                    bool ok = PrintWindow(form.Handle, hdc, 0);
+                                    g.ReleaseHdc(hdc);
+                                    Console.WriteLine("PrintWindow(flags=0)=" + ok);
+                                }
+                                target.Save(Path.Combine(Path.GetTempPath(), "qr-live-printwindow.png"), ImageFormat.Png);
+                            }
+                            using (Bitmap target2 = new Bitmap(w, h))
+                            {
+                                using (Graphics g = Graphics.FromImage(target2))
+                                {
+                                    IntPtr hdc = g.GetHdc();
+                                    bool ok = PrintWindow(form.Handle, hdc, 2);
+                                    g.ReleaseHdc(hdc);
+                                    Console.WriteLine("PrintWindow(flags=2)=" + ok);
+                                }
+                                target2.Save(Path.Combine(Path.GetTempPath(), "qr-live-printwindow2.png"), ImageFormat.Png);
+                            }
+                            using (Bitmap d2b = new Bitmap(form.Width, form.Height))
+                            {
+                                form.DrawToBitmap(d2b, new Rectangle(0, 0, form.Width, form.Height));
+                                d2b.Save(Path.Combine(Path.GetTempPath(), "qr-live-drawtobitmap.png"), ImageFormat.Png);
+                            }
+                            Console.WriteLine("captured; closing");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine("capture failed: " + ex.Message);
+                        }
+                        form.Close();
+                    };
+                    timer.Start();
+                };
+                Application.Run(form);
+                return 0;
+            }
+            if (args.Length > 0 && args[0] == "--qr-render")
+            {
+                // Render the real QrForm to a bitmap in-process. Screen capture proved the
+                // window appears; this proves *what it paints*, deterministically.
+                string rp = args.Length > 1
+                    ? args[1]
+                    : "linkok://pair?host=192.168.1.100&port=8787&code=AB12CD&fp=0123456789abcdef";
+                string rpOut = args.Length > 2 ? args[2] : Path.Combine(Path.GetTempPath(), "linkok-qrform.png");
+                try
+                {
+                    using (LinkOK.Helper.QrForm form = new LinkOK.Helper.QrForm(rp))
+                    {
+                        form.Show();
+                        Application.DoEvents();
+                        using (Bitmap bmp = new Bitmap(form.Width, form.Height))
+                        {
+                            form.DrawToBitmap(bmp, new Rectangle(0, 0, form.Width, form.Height));
+                            bmp.Save(rpOut, ImageFormat.Png);
+                        }
+                        Console.WriteLine("Encoded=" + form.Encoded + " size=" + form.Width + "x" + form.Height
+                            + " png=" + rpOut + " bytes=" + new FileInfo(rpOut).Length);
+                        form.Hide();
+                    }
+                    return 0;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine("RENDER FAILED: " + ex.GetType().FullName + ": " + ex.Message);
+                    Console.Error.WriteLine(ex.StackTrace);
+                    return 5;
+                }
+            }
+            if (args.Length > 0 && args[0] == "--qr-window")
+            {
+                // Show the real QR window for the given payload, wait, then capture the screen
+                // so the rendering can be inspected rather than assumed.
+                return QrWindow(args);
+            }
+            if (args.Length > 0 && args[0] == "--dump-qr")
+            {
+                try
+                {
+                    return DumpQr(args);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine("DUMPQR FAILED: " + ex.GetType().FullName + ": " + ex.Message);
+                    Console.Error.WriteLine(ex.StackTrace);
+                    for (Exception inner = ex.InnerException; inner != null; inner = inner.InnerException)
+                    {
+                        Console.Error.WriteLine("  inner: " + inner.GetType().FullName + ": " + inner.Message);
+                    }
+                    return 4;
+                }
+            }
+            Console.OutputEncoding = new UTF8Encoding(false);
+            _root = AppDomain.CurrentDomain.BaseDirectory;
+            // The probe lives in pc/helper/test; the helper exe is one level up.
+            string exe = Path.GetFullPath(Path.Combine(_root, "..", "linkok-helper.exe"));
+            if (!File.Exists(exe))
+            {
+                Console.WriteLine("FAIL helper exe not found: " + exe);
+                return 1;
+            }
+
+            _shotDir = Path.Combine(Path.GetTempPath(), "linkok-probe-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(_shotDir);
+            _logFile = Path.Combine(_shotDir, "helper.log");
+
+            Console.WriteLine("helper : " + exe);
+            Console.WriteLine("workdir: " + _shotDir);
+            Console.WriteLine();
+
+            KillStrayHelpers();
+            if (!Launch(exe))
+            {
+                Console.WriteLine("FAIL could not create the helper process");
+                return 1;
+            }
+
+            try
+            {
+                RunChecks(exe);
+            }
+            catch (Exception ex)
+            {
+                Fail("probe threw " + ex.GetType().Name + ": " + ex.Message);
+            }
+            finally
+            {
+                Shutdown();
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("stderr from helper (first 40 lines):");
+            for (int i = 0; i < Math.Min(40, StderrLines.Count); i++)
+            {
+                Console.WriteLine("  | " + StderrLines[i]);
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(_failures == 0
+                ? "RESULT: PASS — all checks green"
+                : "RESULT: FAIL — " + _failures + " check(s) failed");
+            return _failures == 0 ? 0 : 1;
+        }
+
+        /// <summary>
+        /// Verify/tooling hook: run the helper's own QR encoder over a payload and write the
+        /// module matrix + a rendered PNG. Used to check the encoder against an independent
+        /// decoder rather than trusting it by eye.
+        /// </summary>
+        /// <summary>
+        /// Launch the helper, ask it for a QR window, and photograph the screen 2 s later.
+        /// This is the only way to prove the window renders: the form is drawn by GDI+ on a
+        /// desktop we cannot query from here.
+        /// </summary>
+        private static int QrWindow(string[] args)
+        {
+            string payload = args.Length > 1
+                ? args[1]
+                : "linkok://pair?host=192.168.1.100&port=8787&code=AB12CD&fp=0123456789abcdef";
+            string shot = args.Length > 2 ? args[2] : Path.Combine(Path.GetTempPath(), "linkok-qrwin.png");
+
+            _shotDir = Path.Combine(Path.GetTempPath(), "linkok-qrw-" + Guid.NewGuid().ToString("N").Substring(0, 6));
+            Directory.CreateDirectory(_shotDir);
+            _logFile = Path.Combine(_shotDir, "helper.log");
+
+            string exe = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "linkok-helper.exe"));
+            KillStrayHelpers();
+            if (!Launch(exe))
+            {
+                Console.WriteLine("FAIL launch");
+                return 1;
+            }
+
+            Send("{\"cmd\":\"start\"}");
+            WaitFor(delegate(string e) { return e.Contains("\"evt\":\"ready\""); }, 4000);
+            Send("{\"cmd\":\"show-qr\",\"payload\":\"" + JsonEscape(payload) + "\"}");
+            Thread.Sleep(2500);
+
+            // Photograph the primary screen.
+            Rectangle bounds = Screen.PrimaryScreen.Bounds;
+            using (Bitmap full = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb))
+            using (Graphics g = Graphics.FromImage(full))
+            {
+                g.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
+                full.Save(shot, ImageFormat.Png);
+            }
+            Console.WriteLine("screenshot: " + shot + " (" + new FileInfo(shot).Length + " bytes)");
+
+            // Window-targeted capture: proves what the QR window itself contains, independent
+            // of whatever the desktop compositor chose to show on screen.
+            IntPtr qrHwnd = FindWindow(null, "LinkOK — 配对新设备");
+            Console.WriteLine("QR hwnd: " + qrHwnd);
+            if (qrHwnd != IntPtr.Zero)
+            {
+                NativeRect wr;
+                GetWindowRect(qrHwnd, out wr);
+                int w = wr.Right - wr.Left;
+                int h = wr.Bottom - wr.Top;
+                using (Bitmap target = new Bitmap(w, h))
+                {
+                    using (Graphics g = Graphics.FromImage(target))
+                    {
+                        IntPtr hdc = g.GetHdc();
+                        bool ok = PrintWindow(qrHwnd, hdc, 2 /*PW_RENDERFULLCONTENT*/);
+                        g.ReleaseHdc(hdc);
+                        Console.WriteLine("PrintWindow=" + ok + " size=" + w + "x" + h);
+                    }
+                    string targetPath = Path.Combine(Path.GetDirectoryName(shot), "qr-window-target.png");
+                    target.Save(targetPath, ImageFormat.Png);
+                    Console.WriteLine("window capture: " + targetPath);
+                }
+            }
+
+            // Also ask the helper what it logged, so a failure is visible even on a blank screen.
+            Console.WriteLine("--- helper log tail ---");
+            if (File.Exists(_logFile))
+            {
+                string[] logLines = File.ReadAllLines(_logFile);
+                for (int i = Math.Max(0, logLines.Length - 12); i < logLines.Length; i++)
+                {
+                    Console.WriteLine("  " + logLines[i]);
+                }
+            }
+            Console.WriteLine("--- stdout ---");
+            lock (Events)
+            {
+                foreach (string line in Events) Console.WriteLine("  " + line);
+            }
+
+            Send("{\"cmd\":\"quit\"}");
+            WaitForSingleObject(_process, 4000);
+            Shutdown();
+            return 0;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect { public int Left, Top, Right, Bottom; }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr FindWindow(string className, string windowName);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect rect);
+
+        [DllImport("user32.dll")]
+        private static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
+
+        /// <summary>Same marshal-point trick the helper uses (hidden form + Invoke).</summary>
+        private static class HiddenProbe
+        {
+            private static Form _anchor;
+
+            public static void Invoke(MethodInvoker action)
+            {
+                if (_anchor == null || _anchor.IsDisposed)
+                {
+                    _anchor = new Form();
+                    _anchor.ShowInTaskbar = false;
+                    _anchor.FormBorderStyle = FormBorderStyle.None;
+                    _anchor.StartPosition = FormStartPosition.Manual;
+                    _anchor.Location = new Point(-32000, -32000);
+                    _anchor.Size = new Size(1, 1);
+                    _anchor.Show();
+                    _anchor.Hide();
+                }
+                if (_anchor.InvokeRequired) _anchor.Invoke(action);
+                else action();
+            }
+        }
+
+        /// <summary>Start a copy that immediately shares the single-instance mutex, and wait for it.</summary>
+        private static int LaunchAndWaitExit(string exe)
+        {
+            STARTUPINFO si = new STARTUPINFO();
+            si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+            PROCESS_INFORMATION pi;
+            bool ok = CreateProcess(exe, "\"" + exe + "\"", IntPtr.Zero, IntPtr.Zero, false,
+                CREATE_NO_WINDOW, IntPtr.Zero, Path.GetDirectoryName(exe), ref si, out pi);
+            if (!ok)
+            {
+                Console.WriteLine("  second CreateProcess failed, win32=" + Marshal.GetLastWin32Error());
+                return -1;
+            }
+            WaitForSingleObject(pi.hProcess, 8000);
+            int code;
+            GetExitCodeProcess(pi.hProcess, out code);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return code;
+        }
+
+        private static int DumpQr(string[] args)
+        {
+            string payload = args.Length > 1
+                ? args[1]
+                : "linkok://pair?host=192.168.1.100&port=8787&code=AB12CD&fp=0123456789abcdef";
+            string outPng = args.Length > 2
+                ? args[2]
+                : Path.Combine(Path.GetTempPath(), "linkok-qr.png");
+
+            Type encoder = typeof(LinkOK.Helper.QrCode);
+            System.Reflection.MethodInfo encode = encoder.GetMethod("EncodeText",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+            object code = encode.Invoke(null, new object[] { payload });
+            if (code == null)
+            {
+                Console.WriteLine("ENCODE_NULL");
+                return 3;
+            }
+
+            int version = (int)encoder.GetProperty("Version").GetValue(code, null);
+            int size = (int)encoder.GetProperty("Size").GetValue(code, null);
+            System.Reflection.PropertyInfo indexer = encoder.GetProperty("Item");
+            const int quiet = 4;
+            int scaled = 8;
+            int pixels = (size + quiet * 2) * scaled;
+
+            StringBuilder json = new StringBuilder();
+            json.Append("{\"payload\":\"").Append(JsonEscape(payload)).Append("\",\"version\":")
+                .Append(version).Append(",\"size\":").Append(size).Append(",\"rows\":[");
+            using (Bitmap bitmap = new Bitmap(pixels, pixels, PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(bitmap))
+                {
+                    g.Clear(Color.White);
+                    using (SolidBrush black = new SolidBrush(Color.Black))
+                    {
+                        for (int y = 0; y < size; y++)
+                        {
+                            if (y > 0) json.Append(',');
+                            json.Append('"');
+                            for (int x = 0; x < size; x++)
+                            {
+                                bool dark = (bool)indexer.GetValue(code, new object[] { x, y });
+                                json.Append(dark ? '1' : '0');
+                                if (dark)
+                                {
+                                    g.FillRectangle(black, (x + quiet) * scaled, (y + quiet) * scaled,
+                                        scaled, scaled);
+                                }
+                            }
+                            json.Append('"');
+                        }
+                    }
+                }
+                bitmap.Save(outPng, ImageFormat.Png);
+            }
+            json.Append("],\"png\":\"").Append(JsonEscape(outPng)).Append("\"}");
+            Console.WriteLine(json.ToString());
+            return 0;
+        }
+
+        private static bool Launch(string exe)
+        {
+            SECURITY_ATTRIBUTES inherit = new SECURITY_ATTRIBUTES();
+            inherit.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+            inherit.bInheritHandle = true;
+            inherit.lpSecurityDescriptor = IntPtr.Zero;
+
+            IntPtr stdinRead, stdoutWrite, stderrWrite;
+            if (!CreatePipe(out stdinRead, out _stdinWrite, ref inherit, 1 << 16)) return false;
+            if (!CreatePipe(out _stdoutRead, out stdoutWrite, ref inherit, 1 << 16)) return false;
+            if (!CreatePipe(out _stderrRead, out stderrWrite, ref inherit, 1 << 16)) return false;
+
+            STARTUPINFO si = new STARTUPINFO();
+            si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdInput = stdinRead;
+            si.hStdOutput = stdoutWrite;
+            si.hStdError = stderrWrite;
+
+            // Environment is inherited, so the LINKOK_* overrides below reach the child.
+            Environment.SetEnvironmentVariable("LINKOK_SCREENSHOT_DIR", _shotDir);
+            Environment.SetEnvironmentVariable("LINKOK_HELPER_TMP", Path.Combine(_shotDir, "tmp"));
+            Environment.SetEnvironmentVariable("LINKOK_HELPER_LOG", _logFile);
+
+            PROCESS_INFORMATION pi;
+            bool ok = CreateProcess(exe, "\"" + exe + "\"", IntPtr.Zero, IntPtr.Zero, true,
+                CREATE_NO_WINDOW, IntPtr.Zero, Path.GetDirectoryName(exe), ref si, out pi);
+            if (!ok)
+            {
+                Console.WriteLine("  CreateProcess failed, win32=" + Marshal.GetLastWin32Error());
+                return false;
+            }
+
+            _process = pi.hProcess;
+            // The child owns the other ends now.
+            CloseHandle(stdinRead);
+            CloseHandle(stdoutWrite);
+            CloseHandle(stderrWrite);
+            CloseHandle(pi.hThread);
+
+            StartReader("stdout", _stdoutRead, true);
+            StartReader("stderr", _stderrRead, false);
+            return true;
+        }
+
+        private static void StartReader(string name, IntPtr handle, bool isStdout)
+        {
+            Thread thread = new Thread(delegate()
+            {
+                byte[] buffer = new byte[4096];
+                MemoryStream pending = new MemoryStream();
+                while (true)
+                {
+                    int read;
+                    if (!ReadFile(handle, buffer, buffer.Length, out read, IntPtr.Zero) || read <= 0)
+                    {
+                        Thread.Sleep(20);
+                        int available;
+                        if (!PeekNamedPipe(handle, IntPtr.Zero, 0, IntPtr.Zero, out available, IntPtr.Zero))
+                        {
+                            Thread.Sleep(20);
+                            if (WaitForSingleObject(_process, 0) == 0) return; // child gone
+                            continue;
+                        }
+                        if (available <= 0)
+                        {
+                            if (WaitForSingleObject(_process, 50) == 0) return;
+                            continue;
+                        }
+                        continue;
+                    }
+
+                    for (int i = 0; i < read; i++)
+                    {
+                        if (buffer[i] == (byte)'\n')
+                        {
+                            string line = Encoding.UTF8.GetString(pending.ToArray()).TrimEnd('\r');
+                            pending.SetLength(0);
+                            if (line.Length == 0) continue;
+                            if (isStdout)
+                            {
+                                lock (Events)
+                                {
+                                    Events.Add(line);
+                                    StdoutRaw.AppendLine(line);
+                                }
+                            }
+                            else
+                            {
+                                lock (StderrLines) StderrLines.Add(line);
+                            }
+                        }
+                        else
+                        {
+                            pending.WriteByte(buffer[i]);
+                        }
+                    }
+                }
+            });
+            thread.IsBackground = true;
+            thread.Name = "probe-" + name;
+            thread.Start();
+        }
+
+        private static void RunChecks(string exe)
+        {
+            // ── 1. start → ready ────────────────────────────────────────────────
+            Send("{\"cmd\":\"start\"}");
+            string ready = WaitFor(delegate(string e) { return e.Contains("\"evt\":\"ready\""); }, 4000);
+            Check(ready != null, "{\"cmd\":\"start\"} produces {\"evt\":\"ready\"}", ready);
+            Check(ready != null && ready.Contains("\"version\":\"0.1.0\""),
+                "ready carries version 0.1.0", ready);
+
+            // A repeated start must not produce a second ready.
+            Send("{\"cmd\":\"start\"}");
+            Thread.Sleep(400);
+            Check(CountEvents("\"evt\":\"ready\"") == 1, "repeated start does not re-emit ready",
+                "ready count = " + CountEvents("\"evt\":\"ready\""));
+
+            // ── 2. external clipboard text must emit ───────────────────────────
+            const string externalText = "外部应用复制 external-copy-测试";
+            SetClipboardText(externalText);
+            string evt = WaitFor(delegate(string e)
+            {
+                return e.Contains("\"evt\":\"clipboard-text\"") && e.Contains("external-copy-测试");
+            }, 4000);
+            Check(evt != null, "an external clipboard text copy emits clipboard-text", evt);
+            Check(evt != null && evt.Contains("\"sha256\":\""), "clipboard-text carries sha256", evt);
+            Check(evt != null && evt.Contains("\"truncated\":false"), "clipboard-text carries truncated", evt);
+
+            // ── 3. our own text write must NOT emit (echo) ─────────────────────
+            int before = CountEvents("\"evt\":\"clipboard-text\"");
+            Send("{\"cmd\":\"set-clipboard-text\",\"text\":\"来自手机的回复 from-phone-回声\"}");
+            Thread.Sleep(900);
+            int after = CountEvents("\"evt\":\"clipboard-text\"");
+            Check(after == before,
+                "set-clipboard-text is echo-suppressed (no clipboard-text event)",
+                "before=" + before + " after=" + after);
+            Check(ReadClipboardText() == "来自手机的回复 from-phone-回声",
+                "set-clipboard-text actually reached the Windows clipboard",
+                "[" + ReadClipboardText() + "]");
+
+            // ── 4. external clipboard image must emit ──────────────────────────
+            int imagesBefore = CountEvents("\"evt\":\"clipboard-image\"");
+            string png = Path.Combine(Path.GetTempPath(), "linkok-probe-source-" + Guid.NewGuid().ToString("N").Substring(0, 6) + ".png");
+            MakeTestPng(png, 64, 40, Color.FromArgb(200, 30, 90, 200));
+            SetClipboardImage(png);
+            string imageEvent = WaitFor(delegate(string e) { return e.Contains("\"evt\":\"clipboard-image\""); }, 6000);
+            Check(imageEvent != null, "an external clipboard image copy emits clipboard-image", imageEvent);
+            Check(imageEvent != null && imageEvent.Contains("\"width\":64") && imageEvent.Contains("\"height\":40"),
+                "clipboard-image reports 64x40", imageEvent);
+            string imageFile = ExtractString(imageEvent, "file");
+            Check(imageFile != null && File.Exists(imageFile),
+                "clipboard-image spilled a real PNG to the temp dir", imageFile);
+            Check(imageFile != null && imageFile.EndsWith(".png", StringComparison.OrdinalIgnoreCase),
+                "the spill is a .png file", imageFile);
+
+            // ── 5. our own image write must NOT emit (echo) ────────────────────
+            int imagesBeforeWrite = CountEvents("\"evt\":\"clipboard-image\"");
+            Send("{\"cmd\":\"set-clipboard-image\",\"file\":\"" + JsonEscape(png) + "\"}");
+            Thread.Sleep(1200);
+            Check(CountEvents("\"evt\":\"clipboard-image\"") == imagesBeforeWrite,
+                "set-clipboard-image is echo-suppressed (no clipboard-image event)",
+                "before=" + imagesBeforeWrite + " after=" + CountEvents("\"evt\":\"clipboard-image\""));
+            Check(ClipboardImageSize() != null,
+                "set-clipboard-image actually reached the Windows clipboard", ClipboardImageSize());
+
+            // ── 6. screenshot folder → file-captured ──────────────────────────
+            string shot = Path.Combine(_shotDir, "Screenshot_2026-11-25_190000.png");
+            MakeTestPng(shot, 120, 80, Color.FromArgb(255, 10, 160, 60));
+            string captured = WaitFor(delegate(string e)
+            {
+                return e.Contains("\"evt\":\"file-captured\"") && e.Contains("Screenshot_2026-11-25_190000.png");
+            }, 6000);
+            Check(captured != null, "a PNG dropped into the watched folder emits file-captured", captured);
+            Check(captured != null && captured.Contains("\"width\":120") && captured.Contains("\"height\":80"),
+                "file-captured reports 120x80", captured);
+
+            // The same bytes at a different path must be dropped as a Duplicate (same sha256).
+            string dup = Path.Combine(_shotDir, "Screenshot_duplicate.png");
+            File.Copy(shot, dup);
+            Thread.Sleep(1500);
+            Check(CountEvents("\"evt\":\"file-captured\"") == 1,
+                "a byte-identical second file is not delivered twice",
+                "file-captured count = " + CountEvents("\"evt\":\"file-captured\"")
+                + " -> " + AllEventsOf("\"evt\":\"file-captured\""));
+
+            // ── 7. protocol errors are reported, not fatal ────────────────────
+            Send("this is not json");
+            string badJson = WaitFor(delegate(string e) { return e.Contains("\"code\":\"bad-json\""); }, 3000);
+            Check(badJson != null, "a malformed line yields {\"evt\":\"error\",\"code\":\"bad-json\"}", badJson);
+
+            Send("{\"cmd\":\"show-qr\",\"payload\":\"linkok://pair?host=192.168.1.100&port=8787&code=AB12CD&fp=0123456789abcdef\"}");
+            Thread.Sleep(900);
+            Check(CountEvents("\"code\":\"qr-too-long\"") == 0, "a realistic pair payload encodes without error", null);
+            // The window must actually paint: a form created off the UI thread shows but stays blank.
+            IntPtr qr = FindWindow(null, "LinkOK — 配对新设备");
+            Check(qr != IntPtr.Zero, "show-qr creates a visible QR window", "hwnd=" + qr);
+            if (qr != IntPtr.Zero)
+            {
+                NativeRect r;
+                GetWindowRect(qr, out r);
+                using (Bitmap cap = new Bitmap(r.Right - r.Left, r.Bottom - r.Top))
+                {
+                    using (Graphics g = Graphics.FromImage(cap))
+                    {
+                        IntPtr hdc = g.GetHdc();
+                        PrintWindow(qr, hdc, 2);
+                        g.ReleaseHdc(hdc);
+                    }
+                    int dark = 0;
+                    for (int y = 0; y < cap.Height; y += 2)
+                    {
+                        for (int x = 0; x < cap.Width; x += 2)
+                        {
+                            Color c = cap.GetPixel(x, y);
+                            if (c.R < 64 && c.G < 64 && c.B < 64) dark++;
+                        }
+                    }
+                    // A blank window has almost no dark pixels; a QR has thousands.
+                    Check(dark > 500, "the QR window actually painted the code (not blank)",
+                        "dark pixels = " + dark);
+                }
+            }
+            Send("{\"cmd\":\"hide-qr\"}");
+            Thread.Sleep(300);
+
+            Send("{\"cmd\":\"notify\",\"title\":\"已收到手机截图\",\"body\":\"Redmi K50 · 1080x2400\",\"thumbFile\":\"" +
+                 JsonEscape(png) + "\"}");
+            Thread.Sleep(400);
+            Check(CountEvents("\"code\":\"thumb-missing\"") == 0, "notify with an existing thumbnail does not error", null);
+
+            Send("{\"cmd\":\"notify\",\"title\":\"x\",\"body\":\"y\",\"thumbFile\":\"C:\\\\definitely not here.png\"}");
+            string thumbMissing = WaitFor(delegate(string e) { return e.Contains("\"code\":\"thumb-missing\""); }, 3000);
+            Check(thumbMissing != null, "notify with a missing thumbnail reports thumb-missing but survives", thumbMissing);
+
+            // ── 8. paused suppresses capture ──────────────────────────────────
+            Send("{\"cmd\":\"set-paused\",\"paused\":true}");
+            Thread.Sleep(300);
+            int beforePaused = CountEvents("\"evt\":\"clipboard-text\"");
+            SetClipboardText("暂停期间的外部复制 should-be-ignored");
+            Thread.Sleep(1000);
+            Check(CountEvents("\"evt\":\"clipboard-text\"") == beforePaused,
+                "while paused, external clipboard text is not emitted",
+                "before=" + beforePaused + " after=" + CountEvents("\"evt\":\"clipboard-text\""));
+            Send("{\"cmd\":\"set-paused\",\"paused\":false}");
+            Thread.Sleep(300);
+
+            // ── 9. quit ───────────────────────────────────────────────────────
+            Send("{\"cmd\":\"quit\"}");
+            bool exited = WaitForSingleObject(_process, 5000) == 0;
+            int exitCode = -1;
+            GetExitCodeProcess(_process, out exitCode);
+            Check(exited, "{\"cmd\":\"quit\"} terminates the process", exited ? "exited" : "still running");
+            Check(exited && exitCode == 0, "quit exits with code 0", "exit=" + exitCode);
+            Check(CountEvents("\"item\":\"quit\"") == 1, "quit emits tray-click quit before exiting", null);
+
+            Console.WriteLine();
+            Console.WriteLine("--- raw stdout from the helper ---");
+            lock (Events)
+            {
+                foreach (string line in Events) Console.WriteLine("  " + line);
+            }
+        }
+
+        // ── clipboard helpers (this process is STA) ──────────────────────────
+
+        private static void SetClipboardText(string text)
+        {
+            for (int i = 0; i < 10; i++)
+            {
+                try
+                {
+                    Clipboard.SetDataObject(text, true, 5, 80);
+                    return;
+                }
+                catch (ExternalException) { Thread.Sleep(80); }
+            }
+            throw new InvalidOperationException("could not set clipboard text");
+        }
+
+        private static string ReadClipboardText()
+        {
+            for (int i = 0; i < 10; i++)
+            {
+                try
+                {
+                    return Clipboard.ContainsText() ? Clipboard.GetText() : null;
+                }
+                catch (ExternalException) { Thread.Sleep(80); }
+            }
+            return null;
+        }
+
+        private static void SetClipboardImage(string pngPath)
+        {
+            using (Image image = Image.FromFile(pngPath))
+            using (Bitmap bitmap = new Bitmap(image))
+            {
+                byte[] dib = BuildDib(bitmap);
+                for (int i = 0; i < 10; i++)
+                {
+                    if (!NativeClip.OpenClipboard(IntPtr.Zero)) { Thread.Sleep(80); continue; }
+                    try
+                    {
+                        NativeClip.EmptyClipboard();
+                        IntPtr mem = NativeClip.GlobalAlloc(0x0042, (UIntPtr)dib.Length);
+                        IntPtr ptr = NativeClip.GlobalLock(mem);
+                        Marshal.Copy(dib, 0, ptr, dib.Length);
+                        NativeClip.GlobalUnlock(mem);
+                        if (NativeClip.SetClipboardData(8 /*CF_DIB*/, mem) == IntPtr.Zero)
+                        {
+                            NativeClip.GlobalFree(mem);
+                        }
+                        return;
+                    }
+                    finally
+                    {
+                        NativeClip.CloseClipboard();
+                    }
+                }
+            }
+            throw new InvalidOperationException("could not set clipboard image");
+        }
+
+        /// <summary>What the clipboard currently holds, as "WxH", or null when it has no image.</summary>
+        private static string ClipboardImageSize()
+        {
+            for (int i = 0; i < 10; i++)
+            {
+                if (!NativeClip.OpenClipboard(IntPtr.Zero)) { Thread.Sleep(80); continue; }
+                try
+                {
+                    if (!NativeClip.IsClipboardFormatAvailable(8)) return null;
+                    IntPtr handle = NativeClip.GetClipboardData(8);
+                    if (handle == IntPtr.Zero) return null;
+                    IntPtr ptr = NativeClip.GlobalLock(handle);
+                    if (ptr == IntPtr.Zero) return null;
+                    try
+                    {
+                        int width = Marshal.ReadInt32(ptr, 4);
+                        int height = Marshal.ReadInt32(ptr, 8);
+                        return Math.Abs(width) + "x" + Math.Abs(height);
+                    }
+                    finally
+                    {
+                        NativeClip.GlobalUnlock(handle);
+                    }
+                }
+                finally
+                {
+                    NativeClip.CloseClipboard();
+                }
+            }
+            return null;
+        }
+
+        private static void MakeTestPng(string path, int width, int height, Color color)
+        {
+            using (Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(bitmap))
+                {
+                    g.Clear(color);
+                    using (SolidBrush brush = new SolidBrush(Color.FromArgb(255, color.R ^ 0xFF,
+                               color.G, color.B)))
+                    {
+                        g.FillRectangle(brush, 0, 0, width / 2, height / 2);
+                    }
+                }
+                bitmap.Save(path, ImageFormat.Png);
+            }
+        }
+
+        private static void KillStrayHelpers()
+        {
+            foreach (System.Diagnostics.Process existing in System.Diagnostics.Process.GetProcessesByName("linkok-helper"))
+            {
+                try
+                {
+                    existing.Kill();
+                    existing.WaitForExit(3000);
+                    Console.WriteLine("  (killed stray helper pid " + existing.Id + " from an earlier run)");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("  (could not kill stray helper " + existing.Id + ": " + ex.Message + ")");
+                }
+            }
+            Thread.Sleep(300);
+        }
+
+        /// <summary>32bpp bottom-up DIB, the same shape the clipboard normally carries.</summary>
+        private static byte[] BuildDib(Bitmap bitmap)
+        {
+            Rectangle rect = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
+            BitmapData data = bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try
+            {
+                byte[] pixels = new byte[data.Stride * bitmap.Height];
+                Marshal.Copy(data.Scan0, pixels, 0, pixels.Length);
+                int width = bitmap.Width;
+                int height = bitmap.Height;
+                int rowBytes = width * 4;
+                byte[] dib = new byte[40 + rowBytes * height];
+                BitConverter.GetBytes(40).CopyTo(dib, 0);
+                BitConverter.GetBytes(width).CopyTo(dib, 4);
+                BitConverter.GetBytes(height).CopyTo(dib, 8);
+                BitConverter.GetBytes((short)1).CopyTo(dib, 12);
+                BitConverter.GetBytes((short)32).CopyTo(dib, 14);
+                BitConverter.GetBytes(rowBytes * height).CopyTo(dib, 20);
+                BitConverter.GetBytes(2835).CopyTo(dib, 24);
+                BitConverter.GetBytes(2835).CopyTo(dib, 28);
+                for (int y = 0; y < height; y++)
+                {
+                    Buffer.BlockCopy(pixels, (height - 1 - y) * data.Stride, dib, 40 + y * rowBytes, rowBytes);
+                }
+                return dib;
+            }
+            finally
+            {
+                bitmap.UnlockBits(data);
+            }
+        }
+
+        private static class NativeClip
+        {
+            [DllImport("user32.dll", SetLastError = true)] public static extern bool OpenClipboard(IntPtr owner);
+            [DllImport("user32.dll", SetLastError = true)] public static extern bool CloseClipboard();
+            [DllImport("user32.dll", SetLastError = true)] public static extern bool EmptyClipboard();
+            [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr GetClipboardData(uint format);
+            [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetClipboardData(uint format, IntPtr memory);
+            [DllImport("user32.dll", SetLastError = true)] public static extern bool IsClipboardFormatAvailable(uint format);
+            [DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
+            [DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr GlobalLock(IntPtr memory);
+            [DllImport("kernel32.dll", SetLastError = true)] public static extern bool GlobalUnlock(IntPtr memory);
+            [DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr GlobalFree(IntPtr memory);
+        }
+
+        // ── protocol helpers ─────────────────────────────────────────────────
+
+        private static void Send(string line)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(line + "\n");
+            int written;
+            if (!WriteFile(_stdinWrite, bytes, bytes.Length, out written, IntPtr.Zero))
+            {
+                Console.WriteLine("  (stdin write failed, win32=" + Marshal.GetLastWin32Error() + ")");
+            }
+        }
+
+        private static string WaitFor(Predicate<string> match, int timeoutMs)
+        {
+            DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+            while (DateTime.UtcNow < deadline)
+            {
+                lock (Events)
+                {
+                    for (int i = 0; i < Events.Count; i++)
+                    {
+                        if (match(Events[i])) return Events[i];
+                    }
+                }
+                Thread.Sleep(50);
+            }
+            return null;
+        }
+
+        private static int CountEvents(string fragment)
+        {
+            lock (Events)
+            {
+                int count = 0;
+                foreach (string line in Events) if (line.Contains(fragment)) count++;
+                return count;
+            }
+        }
+
+        private static string AllEventsOf(string fragment)
+        {
+            List<string> matches = new List<string>();
+            lock (Events)
+            {
+                foreach (string line in Events)
+                {
+                    if (line.Contains(fragment)) matches.Add(line);
+                }
+            }
+            return string.Join(" | ", matches.ToArray());
+        }
+
+        private static void Check(bool condition, string description, string evidence)
+        {
+            if (condition)
+            {
+                Console.WriteLine("  PASS  " + description);
+            }
+            else
+            {
+                _failures++;
+                Console.WriteLine("  FAIL  " + description);
+                if (!string.IsNullOrEmpty(evidence)) Console.WriteLine("        evidence: " + evidence);
+            }
+        }
+
+        private static void Fail(string message)
+        {
+            _failures++;
+            Console.WriteLine("  FAIL  " + message);
+        }
+
+        private static string ExtractString(string json, string field)
+        {
+            if (json == null) return null;
+            string needle = "\"" + field + "\":\"";
+            int start = json.IndexOf(needle, StringComparison.Ordinal);
+            if (start < 0) return null;
+            start += needle.Length;
+            int end = start;
+            StringBuilder sb = new StringBuilder();
+            while (end < json.Length && json[end] != '"')
+            {
+                if (json[end] == '\\' && end + 1 < json.Length)
+                {
+                    char next = json[end + 1];
+                    if (next == '\\') { sb.Append('\\'); end += 2; continue; }
+                    if (next == '"') { sb.Append('"'); end += 2; continue; }
+                }
+                sb.Append(json[end]);
+                end++;
+            }
+            return sb.ToString();
+        }
+
+        private static string JsonEscape(string value)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (char c in value)
+            {
+                if (c == '\\') sb.Append("\\\\");
+                else if (c == '"') sb.Append("\\\"");
+                else sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
+        private static void Shutdown()
+        {
+            try
+            {
+                if (_process != IntPtr.Zero && WaitForSingleObject(_process, 0) != 0)
+                {
+                    TerminateProcess(_process, 1);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("  (cleanup: " + ex.Message + ")");
+            }
+            finally
+            {
+                if (_process != IntPtr.Zero) CloseHandle(_process);
+                if (_stdinWrite != IntPtr.Zero) CloseHandle(_stdinWrite);
+                if (_stdoutRead != IntPtr.Zero) CloseHandle(_stdoutRead);
+                if (_stderrRead != IntPtr.Zero) CloseHandle(_stderrRead);
+            }
+        }
+    }
+}

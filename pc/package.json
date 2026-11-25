@@ -1,0 +1,19 @@
+{
+  "name": "linkok-hub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LinkOK PC Hub — LAN clipboard and screenshot bridge between one Android Phone and one Windows PC",
+  "type": "commonjs",
+  "main": "src/main.js",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node --test --test-isolation=none \"test/*.test.js\"",
+    "test:verbose": "node --test --test-isolation=none --test-reporter=spec \"test/*.test.js\""
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}
