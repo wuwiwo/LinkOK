@@ -609,39 +609,169 @@ internal sealed class MainWindow : Form
 
     private void RequestNewCode()
     {
-        // 主动向 Hub 要一个新配对码。
+        // 真正向 Hub 申请一个新配对码。
         //
-        // 之前这里只是「把已有的 payload 复制到剪贴板」，而 Hub 已配对时
-        // banner() 根本不打印配对链接 —— 于是 _currentPayload 恒为空，
-        // 二维码区是空白白框，「复制配对链接」复制不到东西，「换个配对码」
-        // 也换不出新码。手机一旦丢失 token（重装、清数据、换机），
-        // 在界面上就再也无法重新配对。
+        // 早先这里只是从日志里再读一遍**已经存在**的那条链接，
+        // 所以点「换个配对码」看起来毫无反应 —— 码当然没变。
         //
-        // 正确做法：调用 Hub 的 POST /api/pairing-code 现场生成一个。
-        // 该端点需要 Bearer Token，而 Token 只有 Hub 自己知道 —— 所以让
-        // **Hub 自己**去调（我们通过一个内部信号触发），或者退而求其次：
-        // 用 Hub 写入日志的配对码（已配对时也会写，见下）。
-        //
-        // 采用后者：Hub 的 banner 已改为「无论是否配对都记录一个新码」，
-        // 这里只要重新读一次日志即可拿到最新的码。
-        string payload = ReadLatestPayloadFromLog();
+        // 正确做法：调用 Hub 的 POST /api/pairing-code。该端点需要 Bearer Token，
+        // 而 Token 就在同一台机器的 device.json 里 —— Launcher 与 Hub 同属本机，
+        // 读它不引入新的信任边界（Hub 本来就以本用户身份运行）。
+        string payload = MintCodeFromHub();
+
         if (!string.IsNullOrEmpty(payload))
         {
             ShowPairing(payload);
             CopyPayload();
             MessageBox.Show(
-                "已生成新的配对链接并复制到剪贴板。\n\n" +
-                "配对码有效期 120 秒。手机打开 LinkOK 扫码即可；\n" +
-                "扫不了就把链接粘贴到手机（别手打，输入法会吞掉 :// 和 ?&=）。",
+                "已生成新的配对码并复制到剪贴板。\n\n" +
+                "有效期 120 秒。手机打开 LinkOK 扫码，或粘贴上面的链接。\n\n" +
+                "注意：别用手机输入法手打链接 —— :// 和 ?&= 会被吞掉或错位。",
                 AppInfo.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
+        // 退路：至少把日志里现有的那条给出来，而不是让按钮看起来没坏。
+        string fallback = ReadLatestPayloadFromLog();
+        if (!string.IsNullOrEmpty(fallback))
+        {
+            ShowPairing(fallback);
+            CopyPayload();
+            MessageBox.Show(
+                "没能让 Hub 生成新码，已改为复制最近一次的配对链接。\n\n" +
+                "如果它已过期（超过 120 秒），请重启 LinkOK 后重试。",
+                AppInfo.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         MessageBox.Show(
-            "没能拿到配对链接。\n\n" +
-            "请确认 LinkOK 正在运行（状态行不是「已停止」），然后重试。\n" +
-            "仍然不行的话，重新双击 LinkOK.exe 重启它。",
-            AppInfo.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            "没能获取配对链接。\n\n" +
+            "请确认 LinkOK 正在运行（状态行不是「已停止」），然后重试。",
+            AppInfo.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    /// <summary>
+    /// 调 Hub 的 `POST /api/pairing-code` 现场生成一个新配对码。
+    ///
+    /// 为什么不直接用匿名端点：协议里 `/api/pairing-code` 需要 Bearer Token
+    /// （只有已配对的客户端能重置配对）。Launcher 与 Hub 跑在同一台机器、
+    /// 同一个用户下，读取 `device.json` 里的 Token 不扩大攻击面 ——
+    /// 能读这个文件的人本来就能直接改 Hub 的状态。
+    /// </summary>
+    private string MintCodeFromHub()
+    {
+        try
+        {
+            string dataDir = Environment.GetEnvironmentVariable("LINKOK_DATA_DIR");
+            if (string.IsNullOrEmpty(dataDir)) dataDir = Path.Combine(_root, ".pc-data");
+            string deviceFile = Path.Combine(dataDir, "device.json");
+            if (!File.Exists(deviceFile))
+            {
+                AppendLog("[警告] device.json 不存在，无法申请新配对码");
+                return null;
+            }
+
+            string json = File.ReadAllText(deviceFile, Encoding.UTF8);
+            string token = ExtractJsonString(json, "token");
+            if (string.IsNullOrEmpty(token))
+            {
+                AppendLog("[警告] device.json 里没有 token，无法申请新配对码");
+                return null;
+            }
+
+            int port = 8787;
+            string cfgFile = Path.Combine(dataDir, "config.json");
+            if (File.Exists(cfgFile))
+            {
+                string cfg = File.ReadAllText(cfgFile, Encoding.UTF8);
+                string portText = ExtractJsonNumber(cfg, "port");
+                int parsed;
+                if (!string.IsNullOrEmpty(portText) && int.TryParse(portText, out parsed) && parsed > 0)
+                {
+                    port = parsed;
+                }
+            }
+
+            var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(
+                "http://127.0.0.1:" + port + "/api/pairing-code");
+            req.Method = "POST";
+            req.Headers.Add("Authorization", "Bearer " + token);
+            req.ContentLength = 0;
+            req.Timeout = 5000;
+            req.ReadWriteTimeout = 5000;
+
+            using (var resp = (System.Net.HttpWebResponse)req.GetResponse())
+            using (var reader = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+            {
+                string body = reader.ReadToEnd();
+                string payload = ExtractJsonString(body, "qrPayload");
+                if (!string.IsNullOrEmpty(payload))
+                {
+                    AppendLog("[信息] 已向 Hub 申请新配对码");
+                    return payload;
+                }
+                AppendLog("[警告] Hub 响应里没有 qrPayload：" + body);
+                return null;
+            }
+        }
+        catch (System.Net.WebException wex)
+        {
+            var http = wex.Response as System.Net.HttpWebResponse;
+            if (http != null)
+            {
+                AppendLog("[警告] 申请配对码失败 HTTP " + (int)http.StatusCode);
+            }
+            else
+            {
+                AppendLog("[警告] 申请配对码失败：" + wex.Message);
+            }
+            return null;
+        }
+        catch (Exception ex)
+        {
+            AppendLog("[警告] 申请配对码异常：" + ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>从 JSON 文本里取一个字符串字段（不引入 JSON 库，形状固定）。</summary>
+    private static string ExtractJsonString(string json, string key)
+    {
+        string needle = "\"" + key + "\"";
+        int i = json.IndexOf(needle, StringComparison.Ordinal);
+        if (i < 0) return null;
+        int colon = json.IndexOf(':', i + needle.Length);
+        if (colon < 0) return null;
+        int q1 = json.IndexOf('"', colon + 1);
+        if (q1 < 0) return null;
+        var sb = new StringBuilder();
+        for (int p = q1 + 1; p < json.Length; p++)
+        {
+            char ch = json[p];
+            if (ch == '\\' && p + 1 < json.Length) { sb.Append(json[p + 1]); p++; continue; }
+            if (ch == '"') break;
+            sb.Append(ch);
+        }
+        string value = sb.ToString();
+        return value.Length == 0 ? null : value;
+    }
+
+    /// <summary>从 JSON 文本里取一个数字字段。</summary>
+    private static string ExtractJsonNumber(string json, string key)
+    {
+        string needle = "\"" + key + "\"";
+        int i = json.IndexOf(needle, StringComparison.Ordinal);
+        if (i < 0) return null;
+        int colon = json.IndexOf(':', i + needle.Length);
+        if (colon < 0) return null;
+        int p = colon + 1;
+        while (p < json.Length && char.IsWhiteSpace(json[p])) p++;
+        var sb = new StringBuilder();
+        while (p < json.Length && (char.IsDigit(json[p]) || json[p] == '-' || json[p] == '.'))
+        {
+            sb.Append(json[p]); p++;
+        }
+        return sb.Length == 0 ? null : sb.ToString();
     }
 
     /// <summary>

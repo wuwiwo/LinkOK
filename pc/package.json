@@ -1,6 +1,6 @@
 {
   "name": "linkok-hub",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "LinkOK PC Hub — LAN clipboard and screenshot bridge between one Android Phone and one Windows PC",
   "type": "commonjs",
@@ -17,5 +17,6 @@
     "qrcode": "^1.5.4"
   }
 }
+
 
 

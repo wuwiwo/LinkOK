@@ -1,5 +1,6 @@
 package com.linkok.app.ui
 
+import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -11,6 +12,15 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -50,9 +60,26 @@ fun PairingScreen(
     val context = LocalContext.current
     var manual by remember { mutableStateOf("") }
     var showManual by remember { mutableStateOf(false) }
-    var lastScanned by remember { mutableStateOf<String?>(null) }
     val busy by vm.busy.collectAsStateWithLifecycle()
     val config by vm.config.collectAsStateWithLifecycle()
+    val message by vm.message.collectAsStateWithLifecycle()
+
+    // 配对失败必须**看得见**。
+    //
+    // 原先这条链路是断的：LinkViewModel 把错误写进 _message，靠 Snackbar 显示，
+    // 而 PairingScreen 里根本没有 SnackbarHost —— 于是"无效的二维码"、
+    // "配对失败"这些话全部被静默丢弃，用户看到的就是"点了没反应也没提示"。
+    //
+    // 现在双保险：Snackbar + 页面内常驻的错误文字（Snackbar 会消失，文字不会）。
+    val snackbar = remember { SnackbarHostState() }
+    var lastError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(message) {
+        message?.let {
+            lastError = it
+            snackbar.showSnackbar(it)
+            vm.clearMessage()
+        }
+    }
 
     // 配对成功后自动进入主界面。
     LaunchedEffect(config.token) {
@@ -65,11 +92,12 @@ fun PairingScreen(
             // 用户取消扫描：什么都不做，不要当成错误。
             return@rememberLauncherForActivityResult
         }
-        lastScanned = contents
         vm.pairFromQr(contents)
     }
 
-    Scaffold { padding ->
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
+    ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -107,14 +135,32 @@ fun PairingScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("扫码配对") }
 
-            if (lastScanned != null && config.token.isBlank() && !busy) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "已读取二维码，但配对未完成。可改用下方的粘贴方式。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    textAlign = TextAlign.Center,
-                )
+            if (lastError != null && config.token.isBlank() && !busy) {
+                Spacer(Modifier.height(12.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = lastError ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.weight(1f),
+                        )
+                        IconButton(onClick = { lastError = null }) {
+                            Icon(
+                                Icons.Outlined.Close,
+                                contentDescription = "关闭提示",
+                                tint = MaterialTheme.colorScheme.onErrorContainer,
+                            )
+                        }
+                    }
+                }
             }
 
             Spacer(Modifier.height(8.dp))
@@ -133,12 +179,43 @@ fun PairingScreen(
                     singleLine = false,
                     minLines = 2,
                 )
-                Spacer(Modifier.height(12.dp))
-                Button(
-                    onClick = { vm.pairFromQr(manual.trim()) },
-                    enabled = manual.isNotBlank() && !busy,
+                Spacer(Modifier.height(8.dp))
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text(if (busy) "配对中…" else "确认配对") }
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    // 从剪贴板粘贴。
+                    //
+                    // 为什么必须有：手打这个链接几乎不可能成功 —— 输入法会把
+                    // "://"、"?"、"&"、"=" 吞掉或错位（实测 linkok://pair?...
+                    // 会变成 inklokpairhost96885）。电脑端的「复制配对链接」按钮
+                    // 把链接放进剪贴板，这里一键读出来即可，不经过键盘。
+                    OutlinedButton(
+                        onClick = {
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                                as android.content.ClipboardManager
+                            val text = runCatching {
+                                cm.primaryClip?.takeIf { it.itemCount > 0 }
+                                    ?.getItemAt(0)?.coerceToText(context)?.toString()
+                            }.getOrNull()
+                            if (text.isNullOrBlank()) {
+                                lastError = "剪贴板是空的。先在电脑窗口点「换个配对码」，再回到这里粘贴。"
+                            } else if (!text.trim().startsWith("linkok://", ignoreCase = true)) {
+                                lastError = "剪贴板里的内容不是配对链接。请先在电脑窗口点「换个配对码」。"
+                            } else {
+                                manual = text.trim()
+                                lastError = null
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) { Text("从剪贴板粘贴") }
+
+                    Button(
+                        onClick = { vm.pairFromQr(manual.trim()) },
+                        enabled = manual.isNotBlank() && !busy,
+                        modifier = Modifier.weight(1f),
+                    ) { Text(if (busy) "配对中…" else "确认配对") }
+                }
             }
 
             if (busy) {
