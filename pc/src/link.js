@@ -467,12 +467,20 @@ class Link extends EventEmitter {
       height: capture.height,
     });
 
-    /** @type {{id: string, sha256: string, startedAt: number, timer: NodeJS.Timeout}} */
+    /**
+     * 保留 png / arrivedAt / 尺寸的引用，是为了连接在等 ACK 期间断掉时
+     * 能把这张图原样塞回队列（见 _onClose）。
+     * @type {{id: string, sha256: string, startedAt: number, timer: NodeJS.Timeout,
+     *         png: Buffer, arrivedAt: Date, width: number|null, height: number|null}}
+     */
     const awaiting = {
       id,
       sha256,
-      // 记录起始时刻，供 /api/state 的 delivery 诊断展示"已经等了多久"。
       startedAt: Date.now(),
+      png: capture.png,
+      arrivedAt: capture.arrivedAt,
+      width: capture.width,
+      height: capture.height,
       timer: setTimeout(() => {
         if (!this.awaitingResult || this.awaitingResult.id !== id) return;
         this.logger.warn(`no capture-result for ${id} after ${CAPTURE_RESULT_TIMEOUT_MS / 1000}s; moving on`);
@@ -562,7 +570,28 @@ class Link extends EventEmitter {
     }
     if (this.awaitingResult) {
       clearTimeout(this.awaitingResult.timer);
+      // 连接在等 ACK 期间断掉 —— 那张图**还没被确认送达**。
+      //
+      // 早先这里只是丢掉 awaitingResult，于是图永久消失：既没有 delivered
+      // 事件（Hub 不会从 pendingOutbound 移除），也没有重新入队，
+      // 重连后也不会补发。用户看到的是"电脑截图了，手机没反应"，
+      // 而日志里只有一行 ECONNRESET。
+      //
+      // 现在把它塞回队列头部，重连时优先补发。
+      const inflight = this.awaitingResult;
+      if (inflight.png) {
+        this.outboundQueue.unshift({
+          png: inflight.png,
+          arrivedAt: inflight.arrivedAt,
+          width: inflight.width,
+          height: inflight.height,
+        });
+        this.logger.info(
+          `capture ${inflight.id} was in flight when the Link dropped; re-queued for the next connection`,
+        );
+      }
       this.awaitingResult = null;
+      this.delivering = false;
     }
     this._abortTransfer();
     this.logger.info(`Link closed (${code})${reason ? `: ${reason}` : ''}`);

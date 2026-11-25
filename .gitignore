@@ -29,6 +29,10 @@ android/app/build/
 tmp/
 .tmp*/
 
+# 临时探针输出
+.*.out
+.*.err
+
 # 测试残留
 .pipeprobe/
 .tmp-run/
@@ -42,3 +46,4 @@ tmp/
 *.suo
 .DS_Store
 Thumbs.db
+

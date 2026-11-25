@@ -178,6 +178,12 @@ class HttpServer extends EventEmitter {
     this.logger = logger;
     this.staticDir = path.resolve(staticDir);
     this.clipboardLog = clipboardLog;
+    /**
+     * 401 握手节流的按来源状态。
+     * 没有它，一个 token 失效的手机会把日志写成每天几个 GB。
+     * @type {Map<string, {lastLoggedAt: number, suppressed: number}>}
+     */
+    this._handshakeRejects = new Map();
     this.getLink = getLink;
     this.isPaused = isPaused;
     this.setPaused = setPaused;
@@ -745,7 +751,26 @@ class HttpServer extends EventEmitter {
     // The handshake must fail with 401 BEFORE Sec-WebSocket-Accept is sent
     // (PROTOCOL §5), otherwise the client thinks it is connected.
     if (!this.isAuthorized(req)) {
-      this.logger.warn(`rejected WebSocket handshake from ${req.socket.remoteAddress || 'unknown'}`);
+      // 节流。
+      //
+      // 手机端的 token 一旦失效，它就会按退避策略不停重连，每次都 401。
+      // 每一笔都写一行 WARN，一天能写出几个 GB —— 实测有用户的日志涨到 5.3 GB，
+      // 磁盘被吃掉、界面卡死，而真正有价值的错误反而被埋掉。
+      //
+      // 同一个来源每 60 秒只记一次，其余计数后一次性汇报。
+      const peer = req.socket.remoteAddress || 'unknown';
+      const nowMs = Date.now();
+      const record = this._handshakeRejects.get(peer);
+      if (!record || nowMs - record.lastLoggedAt >= 60_000) {
+        const suppressed = record ? record.suppressed : 0;
+        const suffix = suppressed > 0 ? ` (${suppressed} more suppressed in the last minute)` : '';
+        this.logger.warn(`rejected WebSocket handshake from ${peer}${suffix}`);
+        this._handshakeRejects.set(peer, { lastLoggedAt: nowMs, suppressed: 0 });
+      } else {
+        record.suppressed += 1;
+        // 不能用 debug：默认级别下看不到，而这是需要知道的
+        // —— 用 info 但同样受上面的节流约束。
+      }
       socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }

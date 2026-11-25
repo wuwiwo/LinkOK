@@ -249,6 +249,24 @@ class Hub extends EventEmitter {
 
     link.on('close', () => {
       if (this.link !== link) return;
+      // 把 Link 上还没发出去的图收回 Hub 的待发队列。
+      //
+      // 不这样做的话，Link 对象被丢弃时它内部的 outboundQueue 一并消失：
+      // 连接断开那一刻正在排队（或正在等 ACK）的截图既没有 delivered，
+      // 也没进 pendingOutbound，重连后永远不会补发。
+      // 用户看到的就是"电脑截图了，手机没反应"。
+      const leftovers = link.drainQueue();
+      if (leftovers && leftovers.length > 0) {
+        const recovered = leftovers.length;
+        for (const capture of leftovers) {
+          this._rememberPendingOutbound(
+            capture.png,
+            capture.arrivedAt,
+            sha256Hex(capture.png),
+          );
+        }
+        this.logger.info(`recovered ${recovered} undelivered capture(s) for replay on reconnect`);
+      }
       this.link = null;
       this.logger.info('Link is down');
       this._updateTray();
