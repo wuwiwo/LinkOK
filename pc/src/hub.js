@@ -652,6 +652,18 @@ class Hub extends EventEmitter {
         '  手机上装 LinkOK → 扫码，或粘贴上面这行',
         '  ─────────────────────────────────────────────',
       );
+    } else {
+      // 已配对时也要留一条可用的配对链接。
+      //
+      // 为什么：手机可能重装、清数据、或换机，此时它需要一个新码，而用户
+      // 手里唯一的界面就是 GUI 窗口。之前这里什么都不打印，导致窗口里
+      // 二维码是空白白框、「复制配对链接」复制不到东西 —— 唯一的出路
+      // 变成了先删 device.json 再重启，普通用户根本想不到。
+      //
+      // 只在日志里写，不在控制台横幅里写：避免已配对的用户误以为还要重新扫。
+      const { code, expiresAt } = this.pairing.mintCode();
+      const payload = this.pairing.qrPayload(this.lanAddress, port, code);
+      this.logger.info(`pairing code ${code} (spare, for a re-pairing; expires ${new Date(expiresAt).toISOString()}): ${payload}`);
     }
 
     lines.push('');

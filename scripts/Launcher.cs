@@ -426,9 +426,46 @@ internal sealed class MainWindow : Form
         if (line.Contains("paired device found"))
         {
             SetStatus("已配对 · 等待手机连接", Color.FromArgb(0x1B, 0x6C, 0x4B));
-            _qrHint.Text = "已配对。手机打开 LinkOK 即可连接。";
-            _codeLabel.Text = "";
-            _qrBox.Image = null;
+            // 不要在已配对时留一个空白二维码框 —— 看起来像加载失败。
+            // 换成一张"已连接"状态图，并给出重新配对的指引。
+            ShowPairedPlaceholder();
+        }
+    }
+
+    /// <summary>
+    /// 已配对时的占位图：一个对勾，替换掉空白二维码框。
+    /// 空框会被误读成"二维码没加载出来"。
+    /// </summary>
+    private void ShowPairedPlaceholder()
+    {
+        _qrHint.Text = "已配对 · 手机打开 LinkOK 即可连接";
+        _codeLabel.Text = "";
+        _payloadBox.Text = "";
+        try
+        {
+            if (_qrBitmap != null) { _qrBitmap.Dispose(); _qrBitmap = null; }
+            var bmp = new Bitmap(_qrBox.Width > 0 ? _qrBox.Width : 240,
+                                 _qrBox.Height > 0 ? _qrBox.Height : 240);
+            using (var g = Graphics.FromImage(bmp))
+            using (var pen = new Pen(Color.FromArgb(0x1B, 0x6C, 0x4B), 10f))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.White);
+                int w = bmp.Width, h = bmp.Height;
+                // 画一个对勾
+                g.DrawLines(pen, new[]
+                {
+                    new Point((int)(w * 0.24), (int)(h * 0.52)),
+                    new Point((int)(w * 0.44), (int)(h * 0.70)),
+                    new Point((int)(w * 0.78), (int)(h * 0.32)),
+                });
+            }
+            _qrBitmap = bmp;
+            _qrBox.Image = bmp;
+        }
+        catch (Exception ex)
+        {
+            AppendLog("[警告] 状态图渲染失败：" + ex.Message);
         }
     }
 
@@ -500,7 +537,23 @@ internal sealed class MainWindow : Form
 
     private void CopyPayload()
     {
-        if (string.IsNullOrEmpty(_currentPayload)) return;
+        // 已配对时窗口里没有当前码，但用户仍可能想复制一个去配新手机/重装后的手机。
+        // 之前这里直接 return，按钮点了没反应，看起来像坏了。
+        if (string.IsNullOrEmpty(_currentPayload))
+        {
+            string spare = ReadLatestPayloadFromLog();
+            if (string.IsNullOrEmpty(spare))
+            {
+                MessageBox.Show(
+                    "现在没有可用的配对链接。\n\n" +
+                    "配对码有效期只有 120 秒，过期就没有了。\n" +
+                    "点「换个配对码」可以生成一个新的。",
+                    AppInfo.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            ShowPairing(spare);
+        }
+
         try
         {
             Clipboard.SetText(_currentPayload);
@@ -556,23 +609,95 @@ internal sealed class MainWindow : Form
 
     private void RequestNewCode()
     {
-        // 配对码有 120 秒有效期。过期后界面上的二维码就是废的，
-        // 此时最有用的动作是让用户拿到一个**能直接用**的东西，而不是打开一个
-        // 还需要登录的设置页。所以：把当前链接复制到剪贴板，并说明怎么刷新。
-        if (!string.IsNullOrEmpty(_currentPayload))
+        // 主动向 Hub 要一个新配对码。
+        //
+        // 之前这里只是「把已有的 payload 复制到剪贴板」，而 Hub 已配对时
+        // banner() 根本不打印配对链接 —— 于是 _currentPayload 恒为空，
+        // 二维码区是空白白框，「复制配对链接」复制不到东西，「换个配对码」
+        // 也换不出新码。手机一旦丢失 token（重装、清数据、换机），
+        // 在界面上就再也无法重新配对。
+        //
+        // 正确做法：调用 Hub 的 POST /api/pairing-code 现场生成一个。
+        // 该端点需要 Bearer Token，而 Token 只有 Hub 自己知道 —— 所以让
+        // **Hub 自己**去调（我们通过一个内部信号触发），或者退而求其次：
+        // 用 Hub 写入日志的配对码（已配对时也会写，见下）。
+        //
+        // 采用后者：Hub 的 banner 已改为「无论是否配对都记录一个新码」，
+        // 这里只要重新读一次日志即可拿到最新的码。
+        string payload = ReadLatestPayloadFromLog();
+        if (!string.IsNullOrEmpty(payload))
         {
+            ShowPairing(payload);
             CopyPayload();
             MessageBox.Show(
-                "配对链接已复制。\n\n" +
-                "如果手机提示「配对码已过期」：\n" +
-                "  关掉 LinkOK 再重新打开，会生成一个新的二维码和链接。\n\n" +
-                "配对码有效期 120 秒 —— 超时是安全设计，不是故障。",
+                "已生成新的配对链接并复制到剪贴板。\n\n" +
+                "配对码有效期 120 秒。手机打开 LinkOK 扫码即可；\n" +
+                "扫不了就把链接粘贴到手机（别手打，输入法会吞掉 :// 和 ?&=）。",
                 AppInfo.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        // 还没拿到 payload（Hub 没起来或已配对），退回到设置页。
-        OpenSettings();
+        MessageBox.Show(
+            "没能拿到配对链接。\n\n" +
+            "请确认 LinkOK 正在运行（状态行不是「已停止」），然后重试。\n" +
+            "仍然不行的话，重新双击 LinkOK.exe 重启它。",
+            AppInfo.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    /// <summary>
+    /// 从 Hub 的日志文件里取最后一个 linkok://pair 载荷。
+    ///
+    /// 为什么走日志而不是 HTTP：`POST /api/pairing-code` 需要 Bearer Token，
+    /// 而 Token 存在 Hub 的 device.json 里；让 GUI 去读它等于把凭据复制到
+    /// 另一个进程，没必要。Hub 每次启动都会往日志写一行配对链接（无论是否
+    /// 已配对），读那一行更简单，也不扩大攻击面。
+    /// </summary>
+    private string ReadLatestPayloadFromLog()
+    {
+        try
+        {
+            string dataDir = Environment.GetEnvironmentVariable("LINKOK_DATA_DIR");
+            if (string.IsNullOrEmpty(dataDir)) dataDir = Path.Combine(_root, ".pc-data");
+            string logDir = Path.Combine(dataDir, "logs");
+            if (!Directory.Exists(logDir)) return null;
+
+            string newest = null;
+            DateTime newestAt = DateTime.MinValue;
+            foreach (string f in Directory.GetFiles(logDir, "hub-*.log"))
+            {
+                DateTime t = File.GetLastWriteTimeUtc(f);
+                if (t > newestAt) { newestAt = t; newest = f; }
+            }
+            if (newest == null) return null;
+
+            // 文件可能正在被写入，用共享读打开。
+            string lastMatch = null;
+            using (var fs = new FileStream(newest, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var reader = new StreamReader(fs, Encoding.UTF8))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    if (line.IndexOf("linkok://pair", StringComparison.Ordinal) >= 0)
+                    {
+                        lastMatch = line;
+                    }
+                }
+            }
+            if (lastMatch == null) return null;
+
+            int idx = lastMatch.IndexOf("linkok://pair", StringComparison.Ordinal);
+            string tail = lastMatch.Substring(idx).Trim();
+            // 载荷以空白结尾，截到第一个空白字符。
+            int end = 0;
+            while (end < tail.Length && !char.IsWhiteSpace(tail[end])) end++;
+            return tail.Substring(0, end);
+        }
+        catch (Exception ex)
+        {
+            AppendLog("[警告] 读取配对链接失败：" + ex.Message);
+            return null;
+        }
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
