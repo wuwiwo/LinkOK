@@ -50,10 +50,21 @@ fun AppRoot(
         }
     }
 
-    // 配对成功（token 从空变为非空，或重新配对拿到了新 token）→ 回到首页并复位 repairing。
+    // 重新配对时记录进入扫码页那一刻的 token。
+    // 只有 token 真的**变了**（拿到了新令牌）才收工回到首页；
+    // 否则 DataStore 的重复发射会把用户从扫码页弹走，表现就是一闪而过。
+    var tokenBeforeRepair by remember { mutableStateOf<String?>(null) }
+
+    // 配对成功（拿到了不同的 token）→ 回到首页并复位 repairing。
     LaunchedEffect(config.token) {
-        if (config.token.isNotBlank() && repairing) {
+        if (!repairing) return@LaunchedEffect
+        val current = config.token
+        val before = tokenBeforeRepair
+        // before == null 表示这是首次配对（原本没有 token），任何非空都应触发。
+        val gotNewToken = current.isNotBlank() && current != before
+        if (gotNewToken) {
             repairing = false
+            tokenBeforeRepair = null
             screen = Screen.STASH
         }
     }
@@ -116,6 +127,7 @@ fun AppRoot(
                 screen = Screen.STASH
             },
             onRepair = {
+                tokenBeforeRepair = config.token
                 repairing = true
                 screen = Screen.SCAN
             },
@@ -132,10 +144,12 @@ fun AppRoot(
             canSkip = true,
             onDone = {
                 repairing = false
+                tokenBeforeRepair = null
                 screen = Screen.STASH
             },
             onCancel = {
                 repairing = false
+                tokenBeforeRepair = null
                 // 未配对时退回欢迎页，已配对时退回首页。
                 screen = if (config.token.isBlank()) Screen.WELCOME else Screen.STASH
             },

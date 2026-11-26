@@ -14,6 +14,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import androidx.lifecycle.ViewModelProvider
 import com.linkok.app.ui.AppRoot
 import com.linkok.app.ui.LinkOKTheme
@@ -64,8 +66,27 @@ class MainActivity : ComponentActivity() {
         // 现在权限由真正需要它的页面（扫码页）自己在进入时申请。
         // 通知权限仍在这里要，因为它不打断任何流程。
         requestNotificationPermission()
-        if (vm.isPaired) vm.startService()
+
+        // 已配对就拉起前台服务。
+        //
+        // 关键：isPaired 读的是 _config.value.token，而 _config 是在 ViewModel
+        // 的 init 协程里异步加载的 —— onCreate 这一刻它还是空值，所以
+        // `if (vm.isPaired) startService()` 永远不成立，服务从未被启动，
+        // 手机也就永远连不上电脑（现象是首页一直显示「电脑未连接」）。
+        //
+        // 现在订阅配置流：一旦读到 token 就启动服务；已经启动过则忽略。
+        lifecycleScope.launch {
+            vm.config.collect { cfg ->
+                if (cfg.token.isNotBlank() && !serviceStarted) {
+                    serviceStarted = true
+                    vm.startService()
+                }
+            }
+        }
     }
+
+    /** 防止配置流多次发射时重复启动服务。 */
+    private var serviceStarted = false
 
     /**
      * 只请求通知权限。

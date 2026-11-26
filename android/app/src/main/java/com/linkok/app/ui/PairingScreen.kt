@@ -124,8 +124,16 @@ fun PairingScreen(
         }
     }
 
+    // 配对成功后自动离开这一页。
+    //
+    // 关键：必须记录「进入本页时是否已经配对过」。
+    // 点「重新配对」时本地本来就存着旧 token，如果只判断「token 非空 → onDone」，
+    // 那么进入扫码页的瞬间就会被弹走 —— 表现就是一闪而过。
+    // 只有 token 从「空」变成「非空」，或者显式配对成功后，才该自动离开。
+    val tokenAtEntry = remember { config.token }
     LaunchedEffect(config.token) {
-        if (config.token.isNotBlank()) onDone()
+        val current = config.token
+        if (current.isNotBlank() && current != tokenAtEntry) onDone()
     }
 
     // 从相册识别

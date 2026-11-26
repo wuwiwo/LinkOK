@@ -17,6 +17,36 @@
 
 ---
 
+## [0.3.2] — 2026-11-26
+
+### 修复
+
+**前台服务从未被启动 —— 手机永远连不上电脑**
+
+`MainActivity.onCreate` 里写 `if (vm.isPaired) vm.startService()`，而
+`isPaired` 读的是 `_config.value.token`；`_config` 在 ViewModel 的 init
+协程里异步加载，onCreate 这一刻还是空值。条件永远不成立，`LinkService`
+从未启动，手机因此不会主动连接电脑。
+
+现象：首页一直显示「电脑未连接」，但两边 token 其实完全一致，
+排查时极易误判成配对失效。
+
+现在订阅 config 流，读到 token 就启动服务（标志位防重复）。
+
+**点「重新配对」一闪而过**
+
+`PairingScreen` 里 `LaunchedEffect(token) { if (非空) onDone() }` 在进入页面
+的瞬间就触发 —— 重新配对时本地本来就存着旧 token，于是刚进去就被弹回首页。
+
+现在记录进入时的 token，只有 token **变成不同的值**才自动离开；
+`AppRoot` 同步记录 `tokenBeforeRepair`，避免 DataStore 重复发射造成误判。
+
+### 验证
+
+修复后实测：手机连上（`hello from Xiaomi M2012K11AC`），
+电脑截图 180237 字节 → 手机 Stash 落盘 180237 字节，完全一致。
+
+---
 ## [0.3.0] — 2026-11-26
 
 ### 新增
