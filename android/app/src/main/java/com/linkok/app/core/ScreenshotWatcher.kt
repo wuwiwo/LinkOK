@@ -79,17 +79,17 @@ class ScreenshotWatcher(
         scope.launch(Dispatchers.IO + job) {
             for (uri in pending) {
                 runCatching { handle(uri) }
-                    .onFailure { Log.w(TAG, "处理截图失败 uri=$uri", it) }
+                    .onFailure { AppLog.w(TAG, "处理截图失败 uri=$uri", it) }
             }
         }
-        Log.i(TAG, "截图监听已启动")
+        AppLog.i(TAG, "截图监听已启动")
     }
 
     fun stop() {
         observer?.let { context.contentResolver.unregisterContentObserver(it) }
         observer = null
         job.cancel()
-        Log.i(TAG, "截图监听已停止")
+        AppLog.i(TAG, "截图监听已停止")
     }
 
     private suspend fun handle(uri: Uri) = withContext(Dispatchers.IO) {
@@ -126,7 +126,7 @@ class ScreenshotWatcher(
 
             if (bytes.isEmpty()) return@withContext
             if (bytes.size > 20 * 1024 * 1024) {
-                Log.w(TAG, "截图超过 20MB，跳过: ${bytes.size} bytes")
+                AppLog.w(TAG, "截图超过 20MB，跳过: ${bytes.size} bytes")
                 return@withContext
             }
 
@@ -137,7 +137,7 @@ class ScreenshotWatcher(
                 bytes
             } else {
                 transcodeToPng(bytes) ?: run {
-                    Log.w(TAG, "无法转码为 PNG，跳过: $name")
+                    AppLog.w(TAG, "无法转码为 PNG，跳过: $name")
                     return@withContext
                 }
             }
@@ -145,7 +145,7 @@ class ScreenshotWatcher(
             // 哈希用**转码后**的内容：Hub 校验的是实际收到的字节。
             val hash = sha256(png)
             if (!seen.add(hash)) {
-                Log.d(TAG, "重复截图，跳过: $name")
+                AppLog.d(TAG, "重复截图，跳过: $name")
                 return@withContext
             }
 
@@ -160,7 +160,7 @@ class ScreenshotWatcher(
                 finalHeight = opts.outHeight.takeIf { it > 0 } ?: height
             }
 
-            Log.i(TAG, "捕获截图: $name (${bytes.size} -> ${png.size} bytes, ${finalWidth}x$finalHeight)")
+            AppLog.i(TAG, "捕获截图: $name (${bytes.size} -> ${png.size} bytes, ${finalWidth}x$finalHeight)")
             onCapture?.invoke(png, finalWidth, finalHeight)
         }
     }
@@ -187,7 +187,7 @@ class ScreenshotWatcher(
             bitmap.recycle()
         }
     }.getOrElse {
-        Log.w(TAG, "转码失败", it)
+        AppLog.w(TAG, "转码失败", it)
         null
     }
 

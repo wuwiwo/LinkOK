@@ -1,5 +1,6 @@
 package com.linkok.app.ui
 
+import com.linkok.app.core.AppLog
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -61,12 +62,12 @@ object QrDecoder {
                     decodeBitmap(bmp)
                 }
                 else -> {
-                    Log.d(TAG, "不支持的帧格式: ${image.format}")
+                    AppLog.d(TAG, "不支持的帧格式: ${image.format}")
                     null
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "解码帧失败", e)
+            AppLog.w(TAG, "解码帧失败", e)
             null
         }
     }
@@ -117,7 +118,7 @@ object QrDecoder {
 
             decodeBitmap(bmp) ?: decodeRotated(bmp)
         } catch (e: Exception) {
-            Log.w(TAG, "解码图片失败", e)
+            AppLog.w(TAG, "解码图片失败", e)
             null
         }
     }

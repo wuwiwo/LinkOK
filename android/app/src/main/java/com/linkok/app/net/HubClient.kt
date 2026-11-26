@@ -1,5 +1,6 @@
 package com.linkok.app.net
 
+import com.linkok.app.core.AppLog
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -144,7 +145,7 @@ class HubClient(
         // 双重判断：既比 Hub 声称的 hash，也比我们自己记录的 hash。
         // Hub 的 hash 不可信（可能被篡改或实现有误），自定义的才是权威。
         if (!claimedSha.isNullOrBlank() && claimedSha != actual) {
-            Log.w(TAG, "clipboard hash 与内容不符，按内容哈希处理")
+            AppLog.w(TAG, "clipboard hash 与内容不符，按内容哈希处理")
         }
         return actual == lastSelfWrittenHash
     }
@@ -202,7 +203,7 @@ class HubClient(
 
     private fun open() {
         if (host.isBlank() || port <= 0 || token.isBlank()) {
-            Log.w(TAG, "缺少连接参数，跳过连接")
+            AppLog.w(TAG, "缺少连接参数，跳过连接")
             return
         }
         _state.value = LinkState.CONNECTING
@@ -214,7 +215,7 @@ class HubClient(
 
         socket = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "已连接 $url")
+                AppLog.i(TAG, "已连接 $url")
                 attempt = 0
                 _state.value = LinkState.CONNECTED
                 webSocket.send(buildJsonObject {
@@ -236,14 +237,14 @@ class HubClient(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 val code = response?.code
-                Log.w(TAG, "连接失败: ${t.message} (code=$code)")
+                AppLog.w(TAG, "连接失败: ${t.message} (code=$code)")
 
                 if (code == 401) {
                     // Token 已失效：电脑端重新配对过、数据目录被删、或换了机器。
                     // 这时无限重试毫无意义 —— 每次都会 401，用户看到的是永远"未连接"，
                     // 而"重新配对"似乎也没反应（因为旧的失败循环还在打断它）。
                     // 唯一正确的做法：停止重连，把状态明确标为"配对失效"。
-                    Log.w(TAG, "Token 被拒绝（401），停止重连并要求重新配对")
+                    AppLog.w(TAG, "Token 被拒绝（401），停止重连并要求重新配对")
                     _state.value = LinkState.TOKEN_REJECTED
                     chunkCleanup()
                     reconnectJob?.cancel(); reconnectJob = null
@@ -261,7 +262,7 @@ class HubClient(
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                Log.i(TAG, "连接关闭 code=$code reason=$reason")
+                AppLog.i(TAG, "连接关闭 code=$code reason=$reason")
                 _state.value = LinkState.DISCONNECTED
                 chunkCleanup()
                 if (code != 1000) scheduleReconnect()
@@ -304,21 +305,21 @@ class HubClient(
 
             "capture-result" -> {
                 val ok = obj["ok"]?.jsonPrimitive?.content
-                Log.d(TAG, "capture-result id=${obj.str("id")} ok=$ok")
+                AppLog.d(TAG, "capture-result id=${obj.str("id")} ok=$ok")
             }
 
-            else -> Log.d(TAG, "未处理的消息类型: ${obj["type"]}")
+            else -> AppLog.d(TAG, "未处理的消息类型: ${obj["type"]}")
         }
     }
 
     private fun handleBinary(bytes: ByteString) {
         val id = pendingCaptureId ?: run {
-            Log.w(TAG, "收到二进制帧但没有待接收的 capture")
+            AppLog.w(TAG, "收到二进制帧但没有待接收的 capture")
             return
         }
         val meta = pendingCaptureMeta
         if (meta == null) {
-            Log.w(TAG, "分片缓冲缺失 meta id=$id")
+            AppLog.w(TAG, "分片缓冲缺失 meta id=$id")
             return
         }
         val entry = chunks.getOrPut(id) { ByteArrayOutputStream() to 1 }
@@ -333,11 +334,11 @@ class HubClient(
         if (expected <= 0) {
             // 没有可信的总大小就不要提前收尾。等连接侧的超时兜底，
             // 总比把半张图当完整图存下去强。
-            Log.w(TAG, "capture $id 没有有效字节数（$expected），暂不完成")
+            AppLog.w(TAG, "capture $id 没有有效字节数（$expected），暂不完成")
             return
         }
         if (received > expected) {
-            Log.w(TAG, "capture $id 收到的字节数超过声明值（$received > $expected），丢弃")
+            AppLog.w(TAG, "capture $id 收到的字节数超过声明值（$received > $expected），丢弃")
             chunks.remove(id)
             pendingCaptureId = null
             pendingCaptureMeta = null
@@ -361,11 +362,12 @@ class HubClient(
         }
         val actual = sha256Bytes(data)
         if (meta.sha256.isNotBlank() && actual != meta.sha256) {
-            Log.e(TAG, "图片哈希不符，丢弃 id=$id 期望=${meta.sha256} 实际=$actual")
+            AppLog.e(TAG, "图片哈希不符，丢弃 id=$id 期望=${meta.sha256} 实际=$actual")
             sendCaptureResult(id, ok = false, reason = "hash_mismatch")
             return
         }
 
+        AppLog.i(TAG, "收到图片 ${meta.id} (${data.size} B)，转交落盘")
         _messages.tryEmit(meta)
         // 图像本体通过 completedCapture 交给 Service，避免大字节数组进出 Flow。
         val handled = completedCaptureHandler?.invoke(meta, data) ?: false
@@ -387,7 +389,9 @@ class HubClient(
             if (reason != null) put("reason", reason)
         }
         socket?.send(payload.toString())
-        Log.d(TAG, "capture-result id=$id ok=$ok${reason?.let { " reason=$it" } ?: ""}")
+        // 用 INFO 而不是 DEBUG：这一行是判断「Hub 为什么说没收到」的关键依据。
+        // 默认级别是 INFO，用 DEBUG 等于在正式包里看不见。
+        AppLog.i(TAG, "已回执 capture-result id=$id ok=$ok${reason?.let { " reason=$it" } ?: ""}")
     }
 
     /**
@@ -411,7 +415,7 @@ class HubClient(
         if (reconnectJob?.isActive == true) return
         reconnectJob = scope.launch {
             val wait = backoffMs(attempt)
-            Log.i(TAG, "第 ${attempt + 1} 次重连，等待 ${wait}ms")
+            AppLog.i(TAG, "第 ${attempt + 1} 次重连，等待 ${wait}ms")
             delay(wait)
             attempt++
             open()

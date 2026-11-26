@@ -1,5 +1,6 @@
 package com.linkok.app.tile
 
+import com.linkok.app.core.AppLog
 import android.content.Context
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
@@ -31,7 +32,7 @@ class PushClipboardTile : TileService() {
         super.onClick()
         val svc = LinkService.instance
         if (svc == null) {
-            Log.w(TAG, "服务未运行，无法推送")
+            AppLog.w(TAG, "服务未运行，无法推送")
             flashTile(false)
             return
         }

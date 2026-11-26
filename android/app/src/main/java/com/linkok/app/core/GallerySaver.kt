@@ -25,7 +25,7 @@ object GallerySaver {
      */
     fun savePng(context: Context, src: File, baseName: String): Boolean {
         if (!src.exists() || src.length() == 0L) {
-            Log.w(TAG, "源文件不存在或为空: ${src.absolutePath}")
+            AppLog.w(TAG, "源文件不存在或为空: ${src.absolutePath}")
             return false
         }
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -48,7 +48,7 @@ object GallerySaver {
 
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             ?: run {
-                Log.e(TAG, "插入 MediaStore 失败")
+                AppLog.e(TAG, "插入 MediaStore 失败")
                 return false
             }
 
@@ -60,10 +60,10 @@ object GallerySaver {
             values.clear()
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
-            Log.i(TAG, "已保存到相册: $relative/$baseName.png")
+            AppLog.i(TAG, "已保存到相册: $relative/$baseName.png")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "写入相册失败", e)
+            AppLog.e(TAG, "写入相册失败", e)
             // 清理半成品，避免相册里出现损坏条目。
             runCatching { resolver.delete(uri, null, null) }
             false
@@ -77,16 +77,16 @@ object GallerySaver {
             ALBUM,
         )
         if (!dir.exists() && !dir.mkdirs()) {
-            Log.e(TAG, "无法创建目录 ${dir.absolutePath}")
+            AppLog.e(TAG, "无法创建目录 ${dir.absolutePath}")
             return false
         }
         return runCatching {
             val dest = File(dir, "$baseName.png")
             src.copyTo(dest, overwrite = true)
-            Log.i(TAG, "已保存到 ${dest.absolutePath}")
+            AppLog.i(TAG, "已保存到 ${dest.absolutePath}")
             true
         }.getOrElse {
-            Log.e(TAG, "复制失败", it)
+            AppLog.e(TAG, "复制失败", it)
             false
         }
     }

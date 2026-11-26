@@ -7,6 +7,8 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
+import com.linkok.app.core.AppLog
+import com.linkok.app.BuildConfig
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -42,6 +44,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 日志必须在一切之前初始化，否则早期崩溃没有任何线索。
+        // debug 构建自动开 DEBUG 级；release 用 INFO。
+        AppLog.init(this, debug = BuildConfig.DEBUG)
+        AppLog.i("MainActivity", "onCreate pid=${android.os.Process.myPid()} ver=${BuildConfig.VERSION_NAME}")
+
         vm = ViewModelProvider(this)[LinkViewModel::class.java]
 
         pendingPayload = payloadFrom(intent)

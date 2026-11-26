@@ -1,5 +1,6 @@
 package com.linkok.app.service
 
+import com.linkok.app.core.AppLog
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -26,18 +27,18 @@ class BootReceiver : BroadcastReceiver() {
         if (action != Intent.ACTION_BOOT_COMPLETED && action != Intent.ACTION_MY_PACKAGE_REPLACED) {
             return
         }
-        Log.i(TAG, "收到 $action，准备启动服务")
+        AppLog.i(TAG, "收到 $action，准备启动服务")
 
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val cfg = ConfigStore(context.applicationContext).current()
                 if (cfg.token.isBlank()) {
-                    Log.i(TAG, "尚未配对，不启动服务")
+                    AppLog.i(TAG, "尚未配对，不启动服务")
                     return@launch
                 }
                 if (!cfg.serviceEnabled) {
-                    Log.i(TAG, "用户已关闭服务，不自动启动")
+                    AppLog.i(TAG, "用户已关闭服务，不自动启动")
                     return@launch
                 }
                 val svc = Intent(context, LinkService::class.java).apply {
@@ -48,9 +49,9 @@ class BootReceiver : BroadcastReceiver() {
                 } else {
                     context.startService(svc)
                 }
-                Log.i(TAG, "服务已拉起")
+                AppLog.i(TAG, "服务已拉起")
             } catch (e: Exception) {
-                Log.e(TAG, "启动服务失败", e)
+                AppLog.e(TAG, "启动服务失败", e)
             } finally {
                 pending.finish()
             }

@@ -109,12 +109,12 @@ class StashStore(private val context: Context) {
                     bytes = bytes.size.toLong(),
                 )
             }.getOrElse {
-                Log.w(TAG, "孤儿文件无法重建：${f.name}", it)
+                AppLog.w(TAG, "孤儿文件无法重建：${f.name}", it)
                 null
             }
         }
         if (recovered.isNotEmpty()) {
-            Log.i(TAG, "从磁盘恢复了 ${recovered.size} 个未索引的截图")
+            AppLog.i(TAG, "从磁盘恢复了 ${recovered.size} 个未索引的截图")
         }
         return recovered
     }
@@ -237,12 +237,12 @@ class StashStore(private val context: Context) {
                 }.getOrElse {
                     // 单条解析失败不该静默消失 —— 之前这里吞掉异常，导致
                     // 索引里的历史条目一条条"蒸发"，磁盘上有文件但界面显示空。
-                    Log.w(TAG, "Stash 条目解析失败，跳过：$o", it)
+                    AppLog.w(TAG, "Stash 条目解析失败，跳过：$o", it)
                     null
                 }
             } ?: emptyList()
         }.getOrElse {
-            Log.e(TAG, "索引读取失败", it)
+            AppLog.e(TAG, "索引读取失败", it)
             emptyList()
         }
     }

@@ -1,5 +1,6 @@
 package com.linkok.app.service
 
+import com.linkok.app.core.AppLog
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -88,6 +89,8 @@ class LinkService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        AppLog.init(this, debug = com.linkok.app.BuildConfig.DEBUG)
+        AppLog.i(TAG, "service onCreate")
         instance = this
         configStore = ConfigStore(this)
         stash = StashStore(this)
@@ -118,6 +121,7 @@ class LinkService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        AppLog.i(TAG, "service onDestroy")
         instance = null
         runCatching { watcher.stop() }
         runCatching { hub.disconnect() }
@@ -130,12 +134,12 @@ class LinkService : Service() {
     private suspend fun connectWithSavedConfig() {
         val cfg = configStore.current()
         if (cfg.token.isBlank() || cfg.hubAddress.isBlank()) {
-            Log.w(TAG, "尚未配对，服务保持运行但不连接")
+            AppLog.w(TAG, "尚未配对（token 或地址为空: token=${cfg.token.isNotBlank()} addr=${cfg.hubAddress}），服务保持运行但不连接")
             updateNotification("尚未配对")
             return
         }
         val (host, port) = splitAddress(cfg.hubAddress) ?: run {
-            Log.e(TAG, "地址格式非法: ${cfg.hubAddress}")
+            AppLog.e(TAG, "地址格式非法: ${cfg.hubAddress}")
             updateNotification("地址无效，请重新配对")
             return
         }
@@ -190,7 +194,7 @@ class LinkService : Service() {
     private fun onPhoneCapture(bytes: ByteArray, width: Int, height: Int) {
         scope.launch {
             if (hub.state.value != LinkState.CONNECTED) {
-                Log.w(TAG, "Link 未就绪，截图暂不上行")
+                AppLog.w(TAG, "Link 未就绪，截图暂不上行")
                 return@launch
             }
             val hash = sha256Hex(bytes)
@@ -198,7 +202,7 @@ class LinkService : Service() {
             val id = arrivedAt.replace("-", "").replace(":", "").replace(".", "").take(18) +
                 "-" + hash.take(6)
             hub.sendCapture(id, hash, arrivedAt, bytes)
-            Log.i(TAG, "已上行截图 $id (${bytes.size} bytes, ${width}x$height)")
+            AppLog.i(TAG, "已上行截图 $id (${bytes.size} bytes, ${width}x$height)")
         }
     }
 
@@ -215,20 +219,20 @@ class LinkService : Service() {
         return try {
             val item = kotlinx.coroutines.runBlocking { stash.put(data, 0, 0) }
             if (item == null) {
-                Log.d(TAG, "重复的 PC Capture，已丢弃 ${meta.id}")
+                AppLog.d(TAG, "重复的 PC Capture，已丢弃 ${meta.id}")
                 // 重复不是失败：Hub 应当继续投递下一张。
                 true
             } else {
                 pendingCount = kotlinx.coroutines.runBlocking { stash.list().size }
                 updateNotification(if (pendingCount > 0) "已连接 · 待保存 $pendingCount 张" else "已连接")
-                Log.i(TAG, "PC Capture 已入 Stash: ${item.id}")
+                AppLog.i(TAG, "PC Capture 已入 Stash: ${item.id}")
                 bumpStashVersion()
                 // UI 正在看这个列表时要立刻看到新图。
                 refreshSignal()
                 true
             }
         } catch (e: Exception) {
-            Log.e(TAG, "PC Capture 落盘失败 ${meta.id}", e)
+            AppLog.e(TAG, "PC Capture 落盘失败 ${meta.id}", e)
             false
         }
     }
@@ -244,7 +248,7 @@ class LinkService : Service() {
     private fun applyRemoteClipboard(msg: HubMessage.ClipboardText) {
         // Echo 抑制：这是硬不变量。见 PROTOCOL.md §5.6。
         if (hub.isEcho(msg.text, msg.sha256)) {
-            Log.d(TAG, "忽略回声剪贴板内容")
+            AppLog.d(TAG, "忽略回声剪贴板内容")
             return
         }
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -254,7 +258,7 @@ class LinkService : Service() {
             hub.noteSelfWritten(msg.text)
             // 让首页看得到"刚刚同步过来什么"。
             clipboardObserver?.invoke("inbound", msg.text)
-        }.onFailure { Log.w(TAG, "写入剪贴板失败", it) }
+        }.onFailure { AppLog.w(TAG, "写入剪贴板失败", it) }
     }
 
     /**
@@ -279,10 +283,10 @@ class LinkService : Service() {
                 runCatching {
                     val cfg = configStore.current()
                     val removed = stash.sweepRetention(cfg.retentionDays)
-                    if (removed > 0) Log.i(TAG, "Retention 清理了 $removed 张")
+                    if (removed > 0) AppLog.i(TAG, "Retention 清理了 $removed 张")
                     if (removed > 0) bumpStashVersion()
                     pendingCount = stash.list().size
-                }.onFailure { Log.w(TAG, "Retention 执行失败", it) }
+                }.onFailure { AppLog.w(TAG, "Retention 执行失败", it) }
                 delay(RETENTION_INTERVAL_MS)
             }
         }

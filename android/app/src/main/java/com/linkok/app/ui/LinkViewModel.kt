@@ -1,5 +1,6 @@
 package com.linkok.app.ui
 
+import com.linkok.app.core.AppLog
 import android.util.Log
 import android.app.Application
 import android.content.Context
@@ -136,7 +137,7 @@ class LinkViewModel(app: Application) : AndroidViewModel(app) {
                 // 因为旧的 401 重连循环还在后台打断新的配对尝试。
                 if (st == LinkState.TOKEN_REJECTED && !lastRejected) {
                     lastRejected = true
-                    Log.w(TAG, "配对已失效，清除本地 token")
+                    AppLog.w(TAG, "配对已失效，清除本地 token")
                     configStore.clearPairing()
                     _message.value = "配对已失效，请重新扫描电脑上的二维码"
                 } else if (st != LinkState.TOKEN_REJECTED) {
@@ -250,7 +251,10 @@ class LinkViewModel(app: Application) : AndroidViewModel(app) {
             val name = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
             val res = Pairing.pair(payload, name, android.os.Build.MODEL)
             if (res == null) {
-                _message.value = "配对失败，请确认电脑上的二维码未过期"
+                // 配对失败最常见的原因是「码已被用掉」或「过期」。
+                // 两者都只能靠电脑端换一个新码解决，所以文案要指向那个动作，
+                // 而不是笼统地说"未过期"。
+                _message.value = "配对失败。请在电脑窗口点「换个配对码」，再扫一次"
             } else {
                 configStore.savePairing(
                     token = res.token,

@@ -1,5 +1,6 @@
 package com.linkok.app.net
 
+import com.linkok.app.core.AppLog
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -94,23 +95,28 @@ object Pairing {
             .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
 
+        // 记录"开始尝试"，与下面的成功/失败日志配对 —— 排查时能看到
+        // 到底发出了几次请求（扫码页曾经每帧触发一次，日志是定位依据）。
+        AppLog.i(TAG, "开始配对 → ${payload.host}:${payload.port} code=${payload.code}")
+
         runCatching {
             client.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
-                    Log.w(TAG, "配对失败 HTTP ${resp.code}: $text")
+                    AppLog.w(TAG, "配对失败 HTTP ${resp.code}: $text")
                     return@withContext null
                 }
                 val obj = json.parseToJsonElement(text).jsonObject
                 val token = obj["token"]?.jsonPrimitive?.content
                 if (token.isNullOrBlank()) {
-                    Log.w(TAG, "配对响应缺少 token: $text")
+                    AppLog.w(TAG, "配对响应缺少 token: $text")
                     return@withContext null
                 }
+                AppLog.i(TAG, "配对成功，token 长度 ${token.length}")
                 Result(token, payload.address, payload.fingerprint)
             }
         }.getOrElse {
-            Log.w(TAG, "配对请求异常", it)
+            AppLog.w(TAG, "配对请求异常", it)
             null
         }
     }

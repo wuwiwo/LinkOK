@@ -1,5 +1,6 @@
 package com.linkok.app.accessibility
 
+import com.linkok.app.core.AppLog
 import android.accessibilityservice.AccessibilityService
 import android.content.ClipboardManager
 import android.content.Context
@@ -39,7 +40,7 @@ class ClipboardAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         isRunning = true
-        Log.i(TAG, "无障碍服务已连接")
+        AppLog.i(TAG, "无障碍服务已连接")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -73,14 +74,14 @@ class ClipboardAccessibilityService : AccessibilityService() {
         val svc = LinkService.instance ?: return
         lastPushed = hash
         svc.pushClipboardToHub(text)
-        Log.d(TAG, "已上行剪贴板 (${text.length} 字符)")
+        AppLog.d(TAG, "已上行剪贴板 (${text.length} 字符)")
     }
 
     /** 供磁贴或 UI 主动触发一次上行。 */
     fun pushNow() = pushCurrentClipboard()
 
     override fun onInterrupt() {
-        Log.w(TAG, "无障碍服务被中断")
+        AppLog.w(TAG, "无障碍服务被中断")
     }
 
     override fun onDestroy() {

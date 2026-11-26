@@ -58,6 +58,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onRepair: () -> Unit,
     onOpenAccessibility: () -> Unit,
+    onOpenLogs: () -> Unit = {},
 ) {
     val config by vm.config.collectAsStateWithLifecycle()
     val link by vm.linkState.collectAsStateWithLifecycle()
@@ -160,6 +161,16 @@ fun SettingsScreen(
                 onClick = { vm.unpair() },
                 destructive = true,
             )
+
+            Divider()
+
+            SectionHeader("诊断")
+            ActionRow(
+                title = "运行日志",
+                subtitle = "查看 / 导出 / 切换详细级别",
+                onClick = onOpenLogs,
+            )
+            HintRow("日志写在 App 私有目录，最多占用约 2.5 MB，更早的自动清理。")
 
             Spacer(Modifier.height(24.dp))
             // 显示真实版本与构建时间。

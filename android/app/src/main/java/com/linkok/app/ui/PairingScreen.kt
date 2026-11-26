@@ -3,6 +3,7 @@ package com.linkok.app.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.util.Size
+import com.linkok.app.core.AppLog
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -106,6 +107,7 @@ fun PairingScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
+        AppLog.i("PairingScreen", "相机权限: $granted")
         hasCamera = granted
         if (!granted) {
             lastError = "未授权相机。可以点「从相册识别」或「粘贴配对链接」。"
@@ -113,6 +115,7 @@ fun PairingScreen(
     }
 
     LaunchedEffect(Unit) {
+        AppLog.i("PairingScreen", "进入扫码页 canSkip=$canSkip")
         if (!hasCamera) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
@@ -152,8 +155,30 @@ fun PairingScreen(
         }
     }
 
+    /**
+     * 已经处理过的二维码内容。
+     *
+     * 为什么必须去重：CameraX 的 ImageAnalysis 每帧都回调，只要二维码还在取景框里
+     * 就会**每帧触发一次配对**。30fps 下 100ms 内能发出 5 次 POST /pair ——
+     * 而配对码是一次性的，第一次成功消耗掉之后，后续 4 次必然 mismatch，
+     * 直接触发 Hub 的「5 次失败锁定 5 分钟」。
+     *
+     * 实测日志：16:36:53.458 生成码 → .486/.517/.549/.584/.627 连续 5 次 mismatch → 锁定。
+     */
+    var lastAttempted by remember { mutableStateOf<String?>(null) }
+
     // 一次只处理一帧，避免解码把主线程拖死。
     val busyDecode = remember { AtomicBoolean(false) }
+
+    // 配对失败后不要立刻重试同一个码（它已经被消耗了）。
+    // 给出明确提示，引导用户去电脑上换个新码。
+    LaunchedEffect(message) {
+        message?.let {
+            lastError = it
+            snackbar.showSnackbar(it)
+            vm.clearMessage()
+        }
+    }
 
     Surface(color = MaterialTheme.colorScheme.surface) {
         Box(Modifier.fillMaxSize()) {
@@ -242,10 +267,19 @@ fun PairingScreen(
                                     previewView = previewView,
                                     busyDecode = busyDecode,
                                     onDecoded = { text ->
-                                        if (text.trim().startsWith("linkok://", ignoreCase = true)) {
-                                            vm.pairFromQr(text.trim())
-                                        } else {
-                                            lastError = "扫到的不是 LinkOK 配对二维码。"
+                                        val trimmed = text.trim()
+                                        AppLog.i("PairingScreen", "扫到二维码: ${trimmed.take(60)}… 已尝试=${lastAttempted != null}")
+                                        if (!trimmed.startsWith("linkok://", ignoreCase = true)) {
+                                            // 不是配对码，只在内容变化时提示一次，避免每帧刷。
+                                            if (lastAttempted != trimmed) {
+                                                lastAttempted = trimmed
+                                                lastError = "扫到的不是 LinkOK 配对二维码。"
+                                            }
+                                        } else if (trimmed != lastAttempted && !busy) {
+                                            // 同一个码只试一次。配对码一次性使用，
+                                            // 重试只会把 Hub 打到锁定。
+                                            lastAttempted = trimmed
+                                            vm.pairFromQr(trimmed)
                                         }
                                     },
                                 )
