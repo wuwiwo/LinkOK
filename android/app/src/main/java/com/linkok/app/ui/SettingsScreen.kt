@@ -165,18 +165,7 @@ fun SettingsScreen(
             // 显示真实版本与构建时间。
             // 早先写死 "LinkOK 0.1.0"，重新安装后界面上看不出任何变化，
             // 无法判断手机上跑的到底是不是刚构建的那个包。
-            Column(Modifier.padding(horizontal = 16.dp)) {
-                Text(
-                    text = "LinkOK ${BuildConfig.VERSION_NAME}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = "构建 ${BuildConfig.BUILD_TIME} · #${BuildConfig.BUILD_CODE}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            VersionFooter(modifier = Modifier.align(Alignment.CenterHorizontally))
             Spacer(Modifier.height(24.dp))
         }
     }

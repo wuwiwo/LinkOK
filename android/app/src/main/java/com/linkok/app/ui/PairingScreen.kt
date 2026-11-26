@@ -341,14 +341,9 @@ fun PairingScreen(
                     }
                 }
 
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    text = "LinkOK ${com.linkok.app.BuildConfig.VERSION_NAME} · 构建 ${com.linkok.app.BuildConfig.BUILD_TIME}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.align(Alignment.CenterHorizontally),
-                )
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(12.dp))
+                VersionFooter(modifier = Modifier.align(Alignment.CenterHorizontally))
+                Spacer(Modifier.height(8.dp))
             }
 
             SnackbarHost(

@@ -12,7 +12,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
  * 应用根：按配对状态决定进入配对引导还是主界面。
  * 设置页与扫码页用简单的本地状态切换，不引入导航库（只有三屏，不值得）。
  */
-enum class Screen { STASH, SETTINGS, SCAN }
+enum class Screen { WELCOME, STASH, SETTINGS, SCAN }
 
 @Composable
 fun AppRoot(
@@ -30,6 +30,11 @@ fun AppRoot(
     // 那个 `LaunchedEffect(token) { if (token 非空) onDone() }` 会在进入的瞬间
     // 把人弹回首页，表现就是"点重新配对没反应"。这是之前的真实 bug。
     var repairing by remember { mutableStateOf(false) }
+
+    // 是否已经过了欢迎页。
+    // 用一次性的本地状态而不是持久化偏好：欢迎页每次都该出现（用户可能
+    // 清过数据或换了手机），但同一次运行内看过了就不再重复。
+    var onboarded by remember { mutableStateOf(false) }
 
     // 深链配对。
     // 关键：singleTask 下第二次点链接走 onNewIntent，App 已经在组合里了，
@@ -53,10 +58,19 @@ fun AppRoot(
         }
     }
 
-    // 未配对时强制进入配对引导；已配对时听用户的选择。
+    // 首屏决策。
+    //
+    // 早先写成「未配对 → 强制 SCAN」，结果是：首次安装、清过数据、或换机后
+    // 一打开 App 就直接怼到扫码页，没有品牌页也没有说明，像是被强行塞进流程。
+    //
+    // 现在多一个 WELCOME 中转页：
+    //   - 尚未配对 → WELCOME（介绍 + 两个按钮：开始配对 / 稍后再说）
+    //   - 已配对   → STASH
+    //   - 用户主动点了「重新配对」或走深链 → SCAN（跳过 WELCOME）
     val effective = when {
-        config.token.isBlank() -> Screen.SCAN
         repairing -> Screen.SCAN
+        config.token.isBlank() && !onboarded -> Screen.WELCOME
+        config.token.isBlank() -> Screen.SCAN
         screen == null -> Screen.STASH
         else -> screen!!
     }
@@ -73,6 +87,18 @@ fun AppRoot(
     }
 
     when (effective) {
+        Screen.WELCOME -> WelcomeScreen(
+            onStartPairing = {
+                onboarded = true
+                screen = Screen.SCAN
+            },
+            onSkip = {
+                // 「稍后再说」也直接去扫码页 —— 不配对 App 没有可用功能，
+                // 但至少用户是自己走进去的，不是被强塞。
+                onboarded = true
+                screen = Screen.SCAN
+            },
+        )
         Screen.STASH -> StashScreen(
             vm = vm,
             onOpenSettings = { screen = Screen.SETTINGS },

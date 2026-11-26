@@ -9,17 +9,27 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
-// ── 版本号纪律 ─────────────────────────────────────────────
-// 之前版本号写死 0.1.0，每次重新安装界面上都显示同样的版本，
-// 根本无法判断手机上跑的是不是刚构建的那个 APK。
+// ── 版本号 ─────────────────────────────────────────────────
+// 语义版本只有一个来源：仓库根目录的 version.config
+//   0.MINOR.PATCH —— MINOR = 功能变更/重大修复，PATCH = 小修复
+// 由 scripts/release.ps1 递增；这里只负责读取和注入。
 //
-// 现在：
-//   - 每次 assemble 递增 versionCode（从 version.properties 读，写回）
-//   - versionName 带上构建日期时间
-//   - BuildConfig 注入构建时间，App 的配对页/设置页可直接显示
-//
-// 注意：Kotlin DSL 脚本的隐式接收者不含 Project，所以 `gradle` 不能直接用。
-// 这里不读 gradle 属性，改为恒定递增 —— 简单、可预期，且正是需要的语义。
+// versionCode 是 Android 的单调递增整数（覆盖安装要求），来自
+// android/version.properties，与语义版本互不干扰。
+
+val semanticVersion: String = run {
+    val f = rootProject.file("../version.config")
+    if (f.exists()) {
+        f.readLines()
+            .firstOrNull { it.trim().startsWith("version=") }
+            ?.substringAfter('=')
+            ?.trim()
+            ?: "0.0.0"
+    } else {
+        "0.0.0"
+    }
+}
+
 val versionPropsFile = rootProject.file("version.properties")
 val versionProps = Properties()
 if (versionPropsFile.exists()) {
@@ -42,8 +52,8 @@ android {
         minSdk = 29
         targetSdk = 34
         versionCode = buildCode
-        // 形如 0.2-1125-2214：主版本 + 构建日期时间，一眼能看出新旧
-        versionName = "0.2-$buildDate"
+        // 形如 0.3.0-1126-0930：语义版本 + 构建时间，一眼能看出新旧
+        versionName = "$semanticVersion-$buildDate"
 
         buildConfigField("String", "BUILD_TIME", "\"$buildDate\"")
         buildConfigField("int", "BUILD_CODE", "$buildCode")

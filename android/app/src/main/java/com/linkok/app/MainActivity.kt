@@ -55,8 +55,36 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        requestRuntimePermissions()
+        // 不在启动时就请求相机权限。
+        //
+        // 早先在这里无条件调 requestRuntimePermissions()，结果是 App 一打开、
+        // 用户还停在欢迎页，系统就弹出「是否允许拍摄照片」——用户根本还不知道
+        // 这个 App 要干什么，很容易点拒绝。
+        //
+        // 现在权限由真正需要它的页面（扫码页）自己在进入时申请。
+        // 通知权限仍在这里要，因为它不打断任何流程。
+        requestNotificationPermission()
         if (vm.isPaired) vm.startService()
+    }
+
+    /**
+     * 只请求通知权限。
+     *
+     * 相机权限交给扫码页按需申请；相册权限**不申请** —— 「从相册识别」走的是
+     * 系统相册选择器（`ActivityResultContracts.GetContent`），它自己会授权单张图片，
+     * 不需要 READ_MEDIA_IMAGES。
+     *
+     * 早先在这里一次性把相机和相册都请求了，结果用户在欢迎页还没看清 App 是
+     * 干什么的，就先被连问两次权限。
+     */
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        requestPermissions.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
     }
 
     /**
@@ -79,28 +107,14 @@ class MainActivity : ComponentActivity() {
         return data.toString()
     }
 
+    /**
+     * 兼容入口：AppRoot 的回调签名仍要求它存在。
+     *
+     * 实际上相机权限已由扫码页按需申请，这里只补通知/相册权限，
+     * 并且只在首次调用时执行 —— 否则用户每进一次配对页就会被弹一次。
+     */
     private fun requestRuntimePermissions() {
-        val wanted = mutableListOf<String>()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            wanted += Manifest.permission.CAMERA
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                wanted += Manifest.permission.POST_NOTIFICATIONS
-            }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                wanted += Manifest.permission.READ_MEDIA_IMAGES
-            }
-        }
-        if (wanted.isNotEmpty()) {
-            requestPermissions.launch(wanted.toTypedArray())
-        }
+        requestNotificationPermission()
     }
 
     /**
