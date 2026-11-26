@@ -29,6 +29,11 @@ android/app/build/
 tmp/
 .tmp*/
 
+# 提交信息临时文件
+.cm.txt
+.commit-msg.txt
+.msg.txt
+
 # 临时探针输出
 .*.out
 .*.err
@@ -46,4 +51,5 @@ tmp/
 *.suo
 .DS_Store
 Thumbs.db
+
 
