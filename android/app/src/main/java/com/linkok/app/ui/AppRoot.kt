@@ -81,9 +81,14 @@ fun AppRoot(
     //   首页 → 交给系统处理（退出）
     // 之前没有这段，系统返回在任意页面都会直接退出 App，
     // 用户反馈"按返回是返回至首页而不是关掉"说的就是这个。
-    androidx.activity.compose.BackHandler(enabled = effective != Screen.STASH) {
+    androidx.activity.compose.BackHandler(enabled = effective == Screen.SETTINGS || effective == Screen.SCAN) {
         repairing = false
-        screen = Screen.STASH
+        // 扫码页返回时看配对状态：未配对回欢迎页，已配对回首页。
+        // 设置页一律回首页。
+        screen = when {
+            effective == Screen.SCAN && config.token.isBlank() -> Screen.WELCOME
+            else -> Screen.STASH
+        }
     }
 
     when (effective) {
@@ -118,14 +123,21 @@ fun AppRoot(
         )
         Screen.SCAN -> PairingScreen(
             vm = vm,
-            canSkip = config.token.isNotBlank() && !repairing,
+            // 返回按钮的显示条件。
+            //
+            // 早先写的是 `token 非空 && !repairing` —— 也就是"只有已配对的人
+            // 才能返回"。但未配对的人从欢迎页走进来时同样需要有退路，
+            // 否则他被困在相机页：没有返回箭头，系统返回键又直接退出 App。
+            // 现在只要能回到欢迎页或首页，就显示返回。
+            canSkip = true,
             onDone = {
                 repairing = false
                 screen = Screen.STASH
             },
             onCancel = {
                 repairing = false
-                screen = Screen.STASH
+                // 未配对时退回欢迎页，已配对时退回首页。
+                screen = if (config.token.isBlank()) Screen.WELCOME else Screen.STASH
             },
             onRequestPermissions = onRequestPermissions,
         )

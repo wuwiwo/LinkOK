@@ -23,6 +23,10 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -148,22 +152,44 @@ fun PairingScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
+                    // statusBarsPadding：不写的话标题会顶到状态栏下面（实测被
+                    // 时间/信号那一行压住）。navigationBarsPadding 同理，否则
+                    // 底部版本号会被手势条盖住。
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp),
             ) {
                 Spacer(Modifier.height(8.dp))
 
-                // 返回（仅在已配对、允许跳过时出现）
-                if (canSkip) {
-                    IconButton(onClick = onCancel, modifier = Modifier.size(40.dp)) {
+                // 返回按钮。
+                //
+                // 参考图的版式是「左上角圆形返回 + 标题」，所以这里始终显示 ——
+                // 早先写 `if (canSkip)` 且 canSkip 要求已配对，导致未配对的人
+                // 被困在相机页，连系统返回键都会直接退出 App。
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(
+                        onClick = onCancel,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                                CircleShape,
+                            ),
+                    ) {
                         Icon(
                             Icons.AutoMirrored.Outlined.ArrowBack,
                             contentDescription = "返回",
                             tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(20.dp),
                         )
                     }
-                    Spacer(Modifier.height(4.dp))
                 }
+
+                Spacer(Modifier.height(16.dp))
 
                 Text(
                     text = "扫码配对电脑",
