@@ -7,6 +7,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import android.util.Log
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
@@ -54,6 +56,7 @@ class StashStore(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = true }
 
     companion object {
+        private const val TAG = "StashStore"
         /** 500MB 容量上限。 */
         const val CAPACITY_BYTES = 500L * 1024 * 1024
         private val ID_TIME_FORMAT =
@@ -61,7 +64,59 @@ class StashStore(private val context: Context) {
     }
 
     suspend fun list(): List<StashItem> = withContext(Dispatchers.IO) {
-        readIndex().sortedByDescending { it.arrivedAt }
+        val indexed = readIndex()
+        // 自愈：磁盘上有 PNG 但索引里没有的孤儿文件，补回索引。
+        //
+        // 为什么需要：早期版本的索引解析 bug 会静默丢弃条目（见 parseOptionalInstant
+        // 的注释），结果是磁盘上 4 张图、索引里只剩 1 条，界面显示"还没有收到截图"，
+        // 而文件其实都在。这里按文件名重建条目，把这些图救回来。
+        val recovered = recoverOrphans(indexed)
+        val all = if (recovered.isEmpty()) indexed else {
+            val merged = indexed + recovered
+            writeIndex(merged)
+            merged
+        }
+        all.sortedByDescending { it.arrivedAt }
+    }
+
+    /** 找出磁盘上存在但索引里没有的 PNG，按文件名重建条目。 */
+    private fun recoverOrphans(indexed: List<StashItem>): List<StashItem> {
+        val known = indexed.map { File(it.fileName).name }.toHashSet()
+        val orphans = dir.listFiles { f -> f.isFile && f.name.endsWith(".png") }
+            ?.filter { it.name !in known }
+            ?: return emptyList()
+        if (orphans.isEmpty()) return emptyList()
+
+        val recovered = orphans.mapNotNull { f ->
+            runCatching {
+                val bytes = f.readBytes()
+                val hash = sha256Hex(bytes)
+                // 文件名形如 <UTC紧凑时间>-<hash前6>.png
+                val base = f.nameWithoutExtension
+                val timePart = base.substringBeforeLast('-')
+                val arrivedAt = runCatching {
+                    java.time.LocalDateTime.parse(
+                        timePart,
+                        java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmssSSS")
+                    ).atZone(java.time.ZoneOffset.UTC).toInstant()
+                }.getOrElse { Instant.ofEpochMilli(f.lastModified()) }
+
+                StashItem(
+                    id = base,
+                    sha256 = hash,
+                    arrivedAt = arrivedAt,
+                    fileName = f.absolutePath,
+                    bytes = bytes.size.toLong(),
+                )
+            }.getOrElse {
+                Log.w(TAG, "孤儿文件无法重建：${f.name}", it)
+                null
+            }
+        }
+        if (recovered.isNotEmpty()) {
+            Log.i(TAG, "从磁盘恢复了 ${recovered.size} 个未索引的截图")
+        }
+        return recovered
     }
 
     /**
@@ -177,12 +232,33 @@ class StashStore(private val context: Context) {
                         bytes = o["bytes"]!!.jsonPrimitive.long,
                         width = o["width"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                         height = o["height"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
-                        savedAt = o["savedAt"]?.jsonPrimitive?.content?.takeIf { it != "null" }
-                            ?.let { Instant.parse(it) },
+                        savedAt = parseOptionalInstant(o["savedAt"]?.jsonPrimitive?.contentOrNull),
                     )
-                }.getOrNull()
+                }.getOrElse {
+                    // 单条解析失败不该静默消失 —— 之前这里吞掉异常，导致
+                    // 索引里的历史条目一条条"蒸发"，磁盘上有文件但界面显示空。
+                    Log.w(TAG, "Stash 条目解析失败，跳过：$o", it)
+                    null
+                }
             } ?: emptyList()
-        }.getOrElse { emptyList() }
+        }.getOrElse {
+            Log.e(TAG, "索引读取失败", it)
+            emptyList()
+        }
+    }
+
+    /**
+     * 解析可选的 Instant 字段。
+     *
+     * 必须同时容忍 null、空字符串、以及字面量 "null" ——
+     * 早期 writeIndex 把「没有 savedAt」写成 `""`，而旧代码用
+     * `takeIf { it != "null" }` 判断，空字符串会通过判断然后
+     * `Instant.parse("")` 抛异常，被 runCatching 吞掉后整条记录被丢弃。
+     * 结果就是：磁盘上有 4 张图，index.json 里只剩最后 1 条。
+     */
+    private fun parseOptionalInstant(raw: String?): Instant? {
+        if (raw.isNullOrBlank() || raw == "null") return null
+        return runCatching { Instant.parse(raw) }.getOrNull()
     }
 
     /**
@@ -213,7 +289,13 @@ class StashStore(private val context: Context) {
         put("bytes", bytes)
         put("width", width)
         put("height", height)
-        put("savedAt", savedAt?.toString() ?: "")
+        // 没有 savedAt 时写真正的 JSON null，而不是空字符串。
+        // 空字符串会诱使读取端 Instant.parse("") 抛异常（旧 bug 的成因）。
+        if (savedAt != null) {
+            put("savedAt", savedAt.toString())
+        } else {
+            put("savedAt", kotlinx.serialization.json.JsonNull)
+        }
     }
 
     private fun removeFromIndex(id: String) {

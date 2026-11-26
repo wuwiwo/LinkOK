@@ -101,6 +101,7 @@ class LinkViewModel(app: Application) : AndroidViewModel(app) {
         // 早先只在 refresh() 里取一次快照，结果配对成功后 UI 一直显示"未连接" ——
         // 因为那次快照发生在 Link 建立之前。必须订阅，而不是轮询一次。
         viewModelScope.launch {
+            var lastStashVersion = -1L
             var lastRejected = false
             while (true) {
                 val svc = LinkService.instance
@@ -112,9 +113,21 @@ class LinkViewModel(app: Application) : AndroidViewModel(app) {
                     svc.clipboardObserver = { direction, text -> noteClipboard(direction, text) }
                 }
 
-                if (st == LinkState.CONNECTED) {
-                    // 连上后顺带刷新一次 Stash，避免错过刚落的图。
+                // **无条件**刷新 Stash。
+                //
+                // 早先只在 st == CONNECTED 时刷新，结果是：图已经落盘了，但只要连接状态
+                // 因为任何原因不是 CONNECTED（重连中、状态流还没更新），
+                // 首页就一直显示"还没有收到截图" —— 用户以为没收到，实际已经在磁盘上。
+                //
+                // 每秒读一次磁盘太浪费，所以先在 Service 侧维护一个「Stash 版本号」，
+                // 只有版本变化时才重新读。
+                val currentVersion = svc?.stashVersion ?: 0L
+                if (currentVersion != lastStashVersion) {
+                    lastStashVersion = currentVersion
                     _items.value = stashStore.list()
+                }
+
+                if (st == LinkState.CONNECTED) {
                     lastRejected = false
                 }
 

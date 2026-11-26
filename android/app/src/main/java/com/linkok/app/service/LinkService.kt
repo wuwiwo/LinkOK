@@ -69,6 +69,21 @@ class LinkService : Service() {
     private var retentionJob: Job? = null
     private var pendingCount = 0
 
+    /**
+     * Stash 的版本号，每次落盘/删除递增。
+     *
+     * UI 侧轮询这个值，只有变化时才重新读磁盘 —— 比每秒调用 stash.list()
+     * 划算得多，也避免了"连接状态不是 CONNECTED 就看不到新图"的问题。
+     */
+    @Volatile
+    var stashVersion: Long = 0L
+        private set
+
+    /** 供落盘、删除、清理等所有会改变 Stash 的地方调用。 */
+    fun bumpStashVersion() {
+        stashVersion += 1
+    }
+
     val linkState: LinkState get() = hub.state.value
 
     override fun onCreate() {
@@ -207,6 +222,7 @@ class LinkService : Service() {
                 pendingCount = kotlinx.coroutines.runBlocking { stash.list().size }
                 updateNotification(if (pendingCount > 0) "已连接 · 待保存 $pendingCount 张" else "已连接")
                 Log.i(TAG, "PC Capture 已入 Stash: ${item.id}")
+                bumpStashVersion()
                 // UI 正在看这个列表时要立刻看到新图。
                 refreshSignal()
                 true
@@ -264,6 +280,7 @@ class LinkService : Service() {
                     val cfg = configStore.current()
                     val removed = stash.sweepRetention(cfg.retentionDays)
                     if (removed > 0) Log.i(TAG, "Retention 清理了 $removed 张")
+                    if (removed > 0) bumpStashVersion()
                     pendingCount = stash.list().size
                 }.onFailure { Log.w(TAG, "Retention 执行失败", it) }
                 delay(RETENTION_INTERVAL_MS)

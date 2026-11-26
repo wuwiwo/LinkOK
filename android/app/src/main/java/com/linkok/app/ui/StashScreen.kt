@@ -8,6 +8,15 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -86,6 +95,9 @@ fun StashScreen(
     val message by vm.message.collectAsStateWithLifecycle()
     val selection by vm.selection.collectAsStateWithLifecycle()
     val lastClipboard by vm.lastClipboard.collectAsStateWithLifecycle()
+
+    // 正在查看大图的条目；null 表示未打开。
+    var viewerItem by remember { mutableStateOf<StashItem?>(null) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -158,38 +170,32 @@ fun StashScreen(
                 EmptyState(modifier = Modifier.weight(1f))
             } else {
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    contentPadding = PaddingValues(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    // 2 列。3 列在 1080p 上每格只有 ~110dp，截图里的文字完全看不清，
+                    // 而截图的主要价值就是"看清上面写了什么"。
+                    columns = GridCells.Fixed(2),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    // 最新一张：全宽大图卡，是全页唯一的视觉重心。
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        LatestCard(
-                            item = items.first(),
-                            onSave = { vm.save(items.first()) },
-                            onDiscard = { vm.discard(items.first()) },
-                        )
-                    }
-
                     grouped.forEach { (label, group) ->
-                        item(span = { GridItemSpan(maxLineSpan) }) {
+                        item(span = { GridItemSpan(maxLineSpan) }, key = "h-$label") {
                             Text(
                                 text = label,
-                                style = MaterialTheme.typography.labelLarge,
+                                style = MaterialTheme.typography.titleSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(top = 16.dp, bottom = 4.dp),
+                                modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
                             )
                         }
-                        // 跳过已作为大图卡展示的第一项，避免重复。
-                        val rest = if (label == "今天") group.drop(1) else group
-                        items(rest, key = { it.id }) { item ->
+                        items(group, key = { it.id }) { item ->
                             Thumb(
                                 item = item,
                                 selected = item.id in selection,
+                                selectionMode = selection.isNotEmpty(),
                                 onClick = {
-                                    if (selection.isEmpty()) vm.save(item)
-                                    else vm.toggleSelection(item.id)
+                                    // 点 = 看大图（这是最主要的动作：先看清内容，再决定存或丢）
+                                    // 多选态下点 = 切换选中。
+                                    if (selection.isNotEmpty()) vm.toggleSelection(item.id)
+                                    else viewerItem = item
                                 },
                                 onLongClick = { vm.toggleSelection(item.id) },
                             )
@@ -198,6 +204,22 @@ fun StashScreen(
                 }
             }
         }
+    }
+
+    // ── 全屏查看大图 ──
+    viewerItem?.let { item ->
+        ImageViewer(
+            item = item,
+            onDismiss = { viewerItem = null },
+            onSave = {
+                vm.save(item)
+                viewerItem = null
+            },
+            onDiscard = {
+                vm.discard(item)
+                viewerItem = null
+            },
+        )
     }
 }
 
@@ -400,26 +422,221 @@ private fun LatestCard(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun Thumb(
     item: StashItem,
     selected: Boolean,
+    selectionMode: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
-    val borderColor = if (selected) MaterialTheme.colorScheme.primary else Color.Transparent
+    // 卡片式缩略图：
+    //   - 外层 20dp 圆角 + 表面色底，内层 16dp 圆角图（同心：20 = 16 + 4 内边距）
+    //   - 未选中时用 outlineVariant 极细描边，让浅色截图不糊进背景
+    //   - 选中时描边换成 primary 并加粗，且右上角出现对勾
+    val shape = RoundedCornerShape(20.dp)
+    val innerShape = RoundedCornerShape(16.dp)
+    val strokeColor = when {
+        selected -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.outlineVariant
+    }
+    val strokeWidth = if (selected) 2.dp else 1.dp
+
     Box(
         modifier = Modifier
-            .aspectRatio(0.6f)
-            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
-            .border(2.dp, borderColor, RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick),
+            .aspectRatio(0.62f)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .border(strokeWidth, strokeColor, shape)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+            )
+            .padding(4.dp),
     ) {
         ThumbnailImage(
             file = File(item.fileName),
             modifier = Modifier.fillMaxSize(),
-            cornerRadius = 12.dp,
+            cornerRadius = 16.dp,
         )
+
+        // 选中标记
+        if (selected) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .size(24.dp)
+                    .background(MaterialTheme.colorScheme.primary, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Outlined.Check,
+                    contentDescription = "已选中",
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+
+        // 底部时间戳：只在多选态下显示会显得突兀，所以常驻但极淡。
+        // 用户需要知道这张是"什么时候"收到的。
+        val timeText = remember(item.id) {
+            java.time.format.DateTimeFormatter.ofPattern("HH:mm")
+                .withZone(java.time.ZoneId.systemDefault())
+                .format(item.arrivedAt)
+        }
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(6.dp)
+                .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+        ) {
+            Text(
+                text = timeText,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+            )
+        }
+    }
+}
+
+/**
+ * 全屏查看大图。
+ *
+ * 为什么必须有：截图的价值在于"看清上面写了什么"，缩略图做不到这件事。
+ * 之前点缩略图会直接保存（危险且不可逆），现在改成先看大图，
+ * 在图上决定保存还是丢弃。
+ *
+ * 交互：
+ *   - 点任意区域 / 按返回 → 关闭
+ *   - 双指缩放 / 拖动查看细节
+ *   - 底部两个按钮：保存 / 丢弃
+ */
+@Composable
+private fun ImageViewer(
+    item: StashItem,
+    onDismiss: () -> Unit,
+    onSave: () -> Unit,
+    onDiscard: () -> Unit,
+) {
+    // 返回键先关掉查看器，而不是退出 App。
+    androidx.activity.compose.BackHandler(enabled = true) { onDismiss() }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black),
+        ) {
+            // 大图，支持缩放与拖动
+            val bitmap = remember(item.id) {
+                runCatching {
+                    BitmapFactory.decodeFile(item.fileName)?.asImageBitmap()
+                }.getOrNull()
+            }
+            var scale by remember { mutableStateOf(1f) }
+            var offset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(item.id) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                scale = (scale * zoom).coerceIn(1f, 6f)
+                                offset = if (scale > 1f) offset + pan else androidx.compose.ui.geometry.Offset.Zero
+                            }
+                        }
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            translationX = offset.x
+                            translationY = offset.y
+                        },
+                )
+            } else {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("图片无法加载", color = Color.White)
+                }
+            }
+
+            // 顶部：关闭 + 时间
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onDismiss) {
+                    Icon(
+                        Icons.Outlined.Close,
+                        contentDescription = "关闭",
+                        tint = Color.White,
+                    )
+                }
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = java.time.format.DateTimeFormatter
+                        .ofPattern("M月d日 HH:mm")
+                        .withZone(java.time.ZoneId.systemDefault())
+                        .format(item.arrivedAt),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White.copy(alpha = 0.75f),
+                )
+                Spacer(Modifier.weight(1f))
+                if (scale > 1f) {
+                    TextButton(onClick = {
+                        scale = 1f
+                        offset = androidx.compose.ui.geometry.Offset.Zero
+                    }) {
+                        Text("还原", color = Color.White.copy(alpha = 0.85f))
+                    }
+                }
+            }
+
+            // 底部操作
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(20.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Button(
+                    onClick = onSave,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp),
+                    shape = RoundedCornerShape(50),
+                ) { Text("保存到相册") }
+
+                OutlinedButton(
+                    onClick = onDiscard,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp),
+                    shape = RoundedCornerShape(50),
+                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                        contentColor = Color.White,
+                    ),
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        Color.White.copy(alpha = 0.5f),
+                    ),
+                ) { Text("丢弃") }
+            }
+        }
     }
 }
 
