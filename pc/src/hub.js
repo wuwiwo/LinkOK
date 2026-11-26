@@ -279,9 +279,15 @@ class Hub extends EventEmitter {
     link.on('duplicate', ({ id }) => {
       this.logger.info(`duplicate capture ${id} dropped`);
     });
-    link.on('delivered', ({ sha256 }) => {
+    link.on('delivered', ({ sha256, id }) => {
       // The Phone confirmed receipt, so this Capture no longer needs replaying.
       this._forgetPendingOutbound(sha256);
+      // 必须记录成功。
+      //
+      // 之前这里什么都不打，导致日志停在 `sending capture` 就再无下文 ——
+      // 看起来像卡住或丢图，实际是投递成功了。排查"手机没收到"时，
+      // 无法区分「发了没确认」和「发了且确认了」，是最误导的一处。
+      this.logger.info(`capture ${id || ''} delivered to the Phone${id ? '' : ` (${sha256.slice(0, 12)}…)`}`);
     });
     link.on('notify', (payload) => {
       this._notify(payload.category, payload.title, payload.body, payload.thumbFile);

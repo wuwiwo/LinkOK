@@ -410,6 +410,8 @@ class Link extends EventEmitter {
       this.logger.warn(`phone rejected a capture: ${message.reason || 'unknown reason'}`);
     } else {
       // The Phone has it: the Hub may now forget it for replay purposes.
+      // 带上 id，让 hub 侧能打出可读的"已送达"记录（之前只传 sha256，
+      // 日志里无法和 sending 那行对应起来）。
       this.emit('delivered', { id, sha256 });
     }
     this._drainQueue();
