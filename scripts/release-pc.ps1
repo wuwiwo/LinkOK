@@ -1,19 +1,16 @@
-# LinkOK 发版脚本
+# LinkOK 发版脚本 —— 电脑端
 #
 # 用法：
-#   .\scripts\release.ps1 -Minor "新增扫码页内取景"        # 0.3.0 -> 0.4.0
-#   .\scripts\release.ps1 -Patch "修复日志洪泛"            # 0.3.0 -> 0.3.1
-#   .\scripts\release.ps1 -Minor "标题" -NoCommit          # 只改版本和 CHANGELOG
+#   .\scripts\release-pc.ps1 -Minor "新增剪贴板历史接口"     # 0.3.2 -> 0.4.0
+#   .\scripts\release-pc.ps1 -Patch "修复日志轮转边界"        # 0.3.2 -> 0.3.3
+#   .\scripts\release-pc.ps1 -Patch "标题" -NoCommit          # 只改版本和 CHANGELOG
 #
-# 做四件事：
-#   1. 按规则递增 version.config 里的语义版本
-#   2. 同步 pc/package.json
-#   3. 在 CHANGELOG.md 的 ## [Unreleased] 之后插入新条目
-#   4. git add / commit / push
+# 只管电脑端（Node Hub + C# helper + 设置页）。
+# 手机端用 scripts/release-android.ps1，两边版本独立。
 #
-# 规则（开发阶段）：
-#   MINOR  功能变更、修复重大问题        -> 进位，PATCH 归零
-#   PATCH  小 bug、文档、小改进          -> 只进 PATCH
+# 规则：0.MINOR.PATCH
+#   MINOR  功能变更、修复重大问题  -> 进位，PATCH 归零
+#   PATCH  小 bug、文档、小改进    -> 只进 PATCH
 
 [CmdletBinding()]
 param(
@@ -33,15 +30,14 @@ $ErrorActionPreference = 'Stop'
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $versionFile = Join-Path $root 'version.config'
-$changelogFile = Join-Path $root 'CHANGELOG.md'
+$changelogFile = Join-Path $root 'CHANGELOG-PC.md'
 $pkgFile = Join-Path $root 'pc\package.json'
 
 if (-not (Test-Path $versionFile)) { throw "找不到 $versionFile" }
 
 # ── 读当前版本 ──────────────────────────────────────────────
-$lines = Get-Content $versionFile
 $current = $null
-foreach ($line in $lines) {
+foreach ($line in (Get-Content $versionFile)) {
     if ($line -match '^\s*version\s*=\s*(.+?)\s*$') { $current = $Matches[1]; break }
 }
 if (-not $current) { throw "version.config 里没有 version= 行" }
@@ -62,18 +58,18 @@ if ($BumpMinor) {
 $newVersion = "$major.$minor.$patchVersion"
 
 Write-Host ""
-Write-Host "  版本：$current  ->  $newVersion" -ForegroundColor Cyan
+Write-Host "  [电脑端] $current  ->  $newVersion" -ForegroundColor Cyan
 Write-Host "  说明：$Message" -ForegroundColor DarkGray
 Write-Host ""
 
 # ── 1. 写回 version.config ──────────────────────────────────
-$out = $lines | ForEach-Object {
+$out = Get-Content $versionFile | ForEach-Object {
     if ($_ -match '^\s*version\s*=') { "version=$newVersion" } else { $_ }
 }
 Set-Content -Path $versionFile -Value $out -Encoding utf8
 Write-Host "  ✓ version.config" -ForegroundColor Green
 
-# ── 2. 同步 package.json ────────────────────────────────────
+# ── 2. 同步 pc/package.json ─────────────────────────────────
 if (Test-Path $pkgFile) {
     $pkg = Get-Content $pkgFile -Raw
     $pkg = $pkg -replace '"version":\s*"[^"]*"', "`"version`": `"$newVersion`""
@@ -81,33 +77,24 @@ if (Test-Path $pkgFile) {
     Write-Host "  ✓ pc/package.json" -ForegroundColor Green
 }
 
-# ── 3. 插入 CHANGELOG 条目 ──────────────────────────────────
+# ── 3. 插入 CHANGELOG-PC 条目 ───────────────────────────────
 if (Test-Path $changelogFile) {
     $cl = Get-Content $changelogFile -Raw
     $today = Get-Date -Format 'yyyy-MM-dd'
-    $entry = @"
-## [$newVersion] — $today
-
-$Message
-
----
-
-"@
-    # 插在 Unreleased 段之后、第一个已发布版本之前
+    $entry = "## [$newVersion] - $today`r`n`r`n$Message`r`n`r`n---`r`n`r`n"
     $anchor = '## [Unreleased]'
     $idx = $cl.IndexOf($anchor)
     if ($idx -ge 0) {
-        $afterAnchor = $cl.IndexOf("`n---", $idx)
+        $afterAnchor = $cl.IndexOf("---", $idx)
         if ($afterAnchor -ge 0) {
-            $insertAt = $afterAnchor + 5
-            $cl = $cl.Substring(0, $insertAt) + "`n" + $entry + $cl.Substring($insertAt).TrimStart("`r", "`n")
-        } else {
-            $cl = $cl.Substring(0, $idx) + $entry + $cl.Substring($idx)
+            $insertAt = $afterAnchor + 3
+            while ($insertAt -lt $cl.Length -and ($cl[$insertAt] -eq "`r" -or $cl[$insertAt] -eq "`n")) { $insertAt++ }
+            $cl = $cl.Substring(0, $insertAt) + "`r`n" + $entry + $cl.Substring($insertAt)
+            [System.IO.File]::WriteAllText($changelogFile, $cl, (New-Object System.Text.UTF8Encoding $false))
+            Write-Host "  ✓ CHANGELOG-PC.md" -ForegroundColor Green
         }
-        [System.IO.File]::WriteAllText($changelogFile, $cl, (New-Object System.Text.UTF8Encoding $false))
-        Write-Host "  ✓ CHANGELOG.md" -ForegroundColor Green
     } else {
-        Write-Warning "  CHANGELOG.md 里找不到 '## [Unreleased]'，跳过"
+        Write-Warning "  CHANGELOG-PC.md 里找不到 '## [Unreleased]'，跳过"
     }
 }
 
@@ -116,16 +103,15 @@ if (-not $NoCommit) {
     Push-Location $root
     try {
         git add -A 2>&1 | Out-Null
-        $commitMsg = "v${newVersion}: $Message"
+        $commitMsg = "pc: v${newVersion} - $Message"
         git commit -m $commitMsg 2>&1 | Out-Null
         Write-Host "  ✓ 已提交：$commitMsg" -ForegroundColor Green
 
-        # 推送。网络不稳时重试几次 —— 这台机器到 github 的连接经常被重置。
         $pushed = $false
-        for ($i = 1; $i -le 5; $i++) {
+        for ($i = 1; $i -le 6; $i++) {
             git push origin main 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) { $pushed = $true; break }
-            Start-Sleep -Seconds 4
+            Start-Sleep -Seconds 5
         }
         if ($pushed) {
             Write-Host "  ✓ 已推送" -ForegroundColor Green
@@ -138,6 +124,6 @@ if (-not $NoCommit) {
 }
 
 Write-Host ""
-Write-Host "  完成。下一步：" -ForegroundColor Cyan
-Write-Host "    构建 APK：. .\scripts\env.ps1; Invoke-Gradle assembleDebug" -ForegroundColor DarkGray
+Write-Host "  电脑端版本：$newVersion" -ForegroundColor Cyan
+Write-Host "  重启 Hub 生效（双击 LinkOK.exe）" -ForegroundColor DarkGray
 Write-Host ""

@@ -10,15 +10,18 @@ plugins {
 }
 
 // ── 版本号 ─────────────────────────────────────────────────
-// 语义版本只有一个来源：仓库根目录的 version.config
-//   0.MINOR.PATCH —— MINOR = 功能变更/重大修复，PATCH = 小修复
-// 由 scripts/release.ps1 递增；这里只负责读取和注入。
+// 手机端与电脑端**各自独立**的语义版本：
+//   android/version.config  ← 本文件（手机 App）
+//   ../version.config       ← 电脑端（Node Hub + C# helper + 设置页）
+//
+// 规则：0.MINOR.PATCH —— MINOR = 功能变更/重大修复，PATCH = 小修复。
+// 由 scripts/release-android.ps1 / release-pc.ps1 各自递增。
 //
 // versionCode 是 Android 的单调递增整数（覆盖安装要求），来自
 // android/version.properties，与语义版本互不干扰。
 
 val semanticVersion: String = run {
-    val f = rootProject.file("../version.config")
+    val f = rootProject.file("version.config")
     if (f.exists()) {
         f.readLines()
             .firstOrNull { it.trim().startsWith("version=") }

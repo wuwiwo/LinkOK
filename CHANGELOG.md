@@ -1,346 +1,38 @@
 # Changelog
 
-本文件的格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
-版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+LinkOK 由两端组成，**版本号与变更记录各自独立**：
 
-手机端 APK 的版本号形如 `0.3.0-1126-0939`（语义版本 + 构建时间），
-可在 App 的**欢迎页/配对页/设置页底部**看到，用来确认装的是哪一次构建。
+| 端 | 版本来源 | 变更记录 | 发版命令 |
+|---|---|---|---|
+| **电脑端**<br>Node Hub / C# 原生桥 / 设置页 | [`version.config`](version.config) | [CHANGELOG-PC.md](CHANGELOG-PC.md) | `.\scripts\release-pc.ps1 -Minor\|-Patch "标题"` |
+| **手机 App**<br>Kotlin / Compose / Material 3 | [`android/version.config`](android/version.config) | [CHANGELOG-ANDROID.md](CHANGELOG-ANDROID.md) | `.\scripts\release-android.ps1 -Minor\|-Patch "标题"` |
 
-改版本号请用 `scripts/release.ps1`，它同时更新 `version.config`、
-`pc/package.json` 和本文件，并提交推送。
+两端独立演进的理由：一次改动通常只影响一端，共用一个号会让另一端
+"看起来也升级了"，无法判断实际部署的是哪个版本。
 
----
+## 版本规则
 
-## [Unreleased]
+开发阶段统一用 `0.MINOR.PATCH`：
 
-（下次发版的内容先写在这里）
+| 场景 | 动作 |
+|---|---|
+| 功能变更 / 修复重大问题 | MINOR +1，PATCH 归零 |
+| 小 bug / 文档 / 小改进 | PATCH +1 |
 
----
+发版脚本会一并完成：递增版本文件 → 同步 `pc/package.json`（仅 PC 端）→
+在对应的 CHANGELOG 插入条目 → `git commit` → `git push`。
 
-## [0.3.2] — 2026-11-26
+## 当前版本
 
-### 修复
+- 电脑端：见 [`version.config`](version.config)，运行时访问
+  `http://127.0.0.1:8787/health` 也能看到
+- 手机 App：见 [`android/version.config`](android/version.config)，
+  App 的**欢迎页 / 配对页 / 设置页底部**会显示形如
+  `开发版 0.3.2-1126-1030-debug`（语义版本 + 构建时间）
 
-**前台服务从未被启动 —— 手机永远连不上电脑**
+## 历史
 
-`MainActivity.onCreate` 里写 `if (vm.isPaired) vm.startService()`，而
-`isPaired` 读的是 `_config.value.token`；`_config` 在 ViewModel 的 init
-协程里异步加载，onCreate 这一刻还是空值。条件永远不成立，`LinkService`
-从未启动，手机因此不会主动连接电脑。
+v0.1 ~ v0.3.2 期间两端共用同一个版本号，相关内容已按实际归属拆到上述两份文件：
 
-现象：首页一直显示「电脑未连接」，但两边 token 其实完全一致，
-排查时极易误判成配对失效。
-
-现在订阅 config 流，读到 token 就启动服务（标志位防重复）。
-
-**点「重新配对」一闪而过**
-
-`PairingScreen` 里 `LaunchedEffect(token) { if (非空) onDone() }` 在进入页面
-的瞬间就触发 —— 重新配对时本地本来就存着旧 token，于是刚进去就被弹回首页。
-
-现在记录进入时的 token，只有 token **变成不同的值**才自动离开；
-`AppRoot` 同步记录 `tokenBeforeRepair`，避免 DataStore 重复发射造成误判。
-
-### 验证
-
-修复后实测：手机连上（`hello from Xiaomi M2012K11AC`），
-电脑截图 180237 字节 → 手机 Stash 落盘 180237 字节，完全一致。
-
----
-## [0.3.0] — 2026-11-26
-
-### 新增
-
-**启动页（欢迎页）**
-
-之前「未配对」会被强制路由到扫码页 —— App 一打开就是相机取景，既没有品牌
-也没有说明，像是被塞进一个流程。现在多一个中转页：图标 + 名称 + 一句话介绍
-+ 三条要点（手机截图电脑粘贴 / 电脑截图手机保存 / 纯局域网无账号）
-+ 两个出口（开始配对 / 还没准备好）。
-
-**版本号单一来源 `version.config`**
-
-`0.MINOR.PATCH`：MINOR = 功能变更或重大修复，PATCH = 小修复。
-`scripts/release.ps1` 一条命令同时更新 `version.config`、`pc/package.json`、
-`CHANGELOG.md`，并提交推送。Android 的 `versionCode` 仍由
-`android/version.properties` 单调递增（覆盖安装需要），两者互不干扰。
-
-### 变更
-
-**版本文字规格统一**
-
-三处（欢迎页 / 配对页 / 设置页）抽成 `VersionFooter` 组件：
-`labelSmall` 字号、`onSurfaceVariant` 降到 45% 不透明度、贴近底部。
-它是诊断信息，不该抢注意力。
-
-### 修复
-
-- **一启动就弹相机权限**：`MainActivity.onCreate` 无条件请求，用户在欢迎页
-  还没看清 App 是干什么的就被问「是否允许拍摄照片」。现在相机权限由扫码页
-  在进入时按需申请，启动时只请求通知权限。
-- 扫码页做页内取景（见下条），不再弹 zxing 的全屏 Activity
-
-### 变更（配对页）
-
-**配对页改成页内取景（参考常见的桌面远控 App）**
-
-原来点「扫码配对」会弹出 zxing 的全屏 Activity，和 App 的视觉语言脱节，
-而且无法在同一页里同时给出「粘贴链接」这条降级路径。现在：
-
-- 预览交给 **CameraX**，解码仍用 zxing 的 `core`（不引入 embedded 封装层）
-- 首页式版式：大标题 + 一行说明 + 圆角取景框（四角标记）+「从相册识别」+「粘贴配对链接」
-- 相机权限被拒时，取景框内直接给出「授予相机权限」按钮，不再空白
-- 解码在独立线程、单帧串行（`AtomicBoolean` 闸门），不会拖慢预览
-- 直接解 Y plane 亮度，不做 YUV→RGB 转换，省一次全图拷贝
-- 相册识别：大图先按 1600px 采样，失败时自动尝试 90/180/270 旋转
-
-### 修复
-
-- **取景框盖住副标题**：`PreviewView` 是原生 View，会按自身尺寸溢出父容器。
-  圆角背景只是画在下面，不裁剪子 View —— 加 `Modifier.clip()` 后解决
-- **写死 400dp 高度**在小屏/大字体下会把说明和按钮挤出屏幕，改用 `aspectRatio`
-  并让整列可滚动
-
-### 移除
-
-- `com.journeyapps:zxing-android-embedded` 依赖。它只提供全屏扫码 Activity，
-  已被 CameraX + zxing core 取代。APK 从 57.3 MB 变为 61.4 MB
-  （CameraX 自身比 embedded 大，这是功能换取体积的合理交换）
-
----
-
-## [0.2.3] — 2026-11-26
-
-### 修复
-
-**日志一天涨到 5.3 GB，吃掉磁盘**
-
-手机 token 失效后按退避策略不停重连，每次都 401，Hub 每笔都写一行 WARN。
-实测日志文件涨到 5.3 GB（`hub-2026-11-26.log`），磁盘被吃掉、GUI 读日志卡死，
-真正有价值的错误全被埋掉。
-
-两层防护：
-- **握手拒绝节流**：同一来源每 60 秒只记一条，其余计数后一次性汇报
-  （实测 200 次拒绝只写 1 行日志）
-- **日志文件轮转**：单文件上限 50 MB，超过切分片；同一天最多保留 5 个，
-  更早的自动删除。启动时若发现已有文件超限，立刻轮转而不是继续追加
-
-**连接在等 ACK 期间断开，那张截图永久丢失**
-
-Hub 的 PC Capture 严格串行投递，等 `capture-result` 或 10 秒超时。
-但如果连接在这个窗口内断掉，`_onClose` 只是清掉 `awaitingResult`——
-那张图既没有 `delivered`（不会从待重放队列移除），也没有重新入队，
-重连后**永远不会补发**。用户看到的就是「电脑截图了，手机没反应」，
-日志里只有一行 `ECONNRESET`。
-
-现在把它塞回队列头部优先重发，并把 Link 内部队列里剩余的图一并回收：
-
-```
-capture …-0001 was in flight when the Link dropped; re-queued for the next connection
-recovered 1 undelivered capture(s) for replay on reconnect
-```
-
----
-
-## [0.2.2] — 2026-11-25
-
-### 修复
-
-**「换个配对码」点了不换**
-
-上一版只是从日志里重读**已经存在**的那条链接，从未请求 Hub 生成新码，所以链接当然不变。
-现在真正调用 `POST /api/pairing-code`（用 `device.json` 里的 Token），
-生成并复制一个全新的码；失败时才退回日志里的旧链接，并明确告知。
-
-**手机输入配对链接「没反应也没提示」**
-
-`LinkViewModel` 把错误写进 `_message`，靠 Snackbar 显示，而 **`PairingScreen` 里没有
-`SnackbarHost`** —— 于是「无效的二维码」「配对失败」这些话全被静默丢弃。
-用户看到的就是点了没反应。现在双保险：Snackbar + 页面内常驻的错误条（Snackbar 会消失，错误条不会）。
-
-**手打配对链接几乎不可能成功**
-
-输入法会吞掉 `://`、`?`、`&`、`=`（实测 `linkok://pair?...` 变成 `inklokpairhost96885`）。
-新增**「从剪贴板粘贴」**按钮：电脑窗口点「换个配对码」会把链接放进剪贴板，
-手机上点这个按钮一键读入，完全不经过键盘。
-
----
-
-## [0.2.1] — 2026-11-25
-
-### 修复
-
-**已配对时，窗口里的二维码是空白白框**
-
-Hub 已配对时 `banner()` 不打印配对链接，导致 Launcher 的 `_currentPayload` 恒为空：
-二维码区只剩一个白框，「复制配对链接」复制不到任何东西，「换个配对码」也换不出新码。
-手机一旦丢失 token（重装、清数据、换机），**在界面上就再也无法重新配对** ——
-唯一的出路是手动删掉 `device.json` 再重启，普通用户不可能想到。
-
-修复分两处：
-- Hub 已配对时也在日志里写一条**备用配对码**（标注 `spare, for a re-pairing`），
-  不进控制台横幅，避免让人误以为还要重扫
-- Launcher 的「换个配对码」改为从日志读取最新载荷并显示、复制；
-  「复制配对链接」在无当前码时也会先尝试取备用码，而不是静默 return
-
-**空二维码框会被误读成加载失败**
-
-已配对时不再清空图片留下白框，改为渲染一个对勾状态图，并把提示文字改成
-「已配对 · 手机打开 LinkOK 即可连接」。
-
----
-
-## [Unreleased]
-
-### 计划中
-
-- Windows 原生 Toast 通知（目前依赖托盘气泡，托盘不可用时通知失效）
-- 电脑端设置页的剪贴板历史视图（`GET /api/clipboard` 已就绪，前端未接）
-- 多显示器 / DPI 变化时的托盘图标重绘
-
----
-
-## [0.2] — 2026-11-25
-
-这一版修的是“功能看起来在跑、实际没通”的一批问题。全部来自真机实测发现。
-
-### 修复
-
-**手机收不到电脑截图（最严重）**
-
-手机端 `finishCapture()` 收到图后**从不发送 `capture-result`**。而 Hub 的 PC Capture 是严格
-串行投递的——它等这条 ACK 或 10 秒超时才发下一张。所以每张图都卡满 10 秒，用户看到的现象
-就是“手机没收到”，Hub 日志是 `no capture-result for … after 10s; moving on`。
-
-顺带修了一个相邻缺陷：`bytes` 字段解析失败时会退化为 0，导致第一帧就被当作完整图收下，
-半张图哈希不符被丢弃，Stash 里空无一物。现在只在 `received == expected` 时收尾，并显式处理溢出。
-
-**手机显示「未连接」但其实是连着的**
-
-`LinkViewModel` 只在 `refresh()` 时取一次连接状态快照，而那次快照发生在 Link 建立之前。
-配对成功后 UI 永远停在“未连接”。改为持续跟踪（每 1 秒），连上时顺便刷新 Stash。
-
-**Android 拦截明文 HTTP，配对必然失败**
-
-Android 9+ 默认禁止明文 HTTP，而 LinkOK 的前提就是局域网 `http://192.168.x.x:8787`。
-缺少 `network_security_config` 时所有请求抛
-`UnknownServiceException: CLEARTEXT communication not permitted`，即使密码正确也配不上。
-已加入配置并允许明文（理由和风险边界写在 `network_security_config.xml` 的注释里）。
-
-**截图被 Hub 拒绝（`not a PNG`）**
-
-手机截图默认是 **JPG**（小米实测），而协议要求 PNG。原先直接把 JPG 字节打上 `image/png`
-标签发出去，Hub 校验魔数失败拒绝。现在手机端真实转码为 PNG，且哈希改用**转码后**的内容
-（Hub 校验的是实际收到的字节）。Hub 侧也新增 `sniffImageFormat`，拒绝时直接说明对方发的是什么格式。
-
-**双击 `LinkOK.exe` 没有界面**
-
-最初给的是控制台程序。已重写为 WinForms 窗口：二维码、配对码、可复制链接、实时日志、三个按钮，
-关掉窗口缩到托盘继续运行。
-
-**双击 `start.cmd` 没反应**
-
-文件是 UTF-8，但 `cmd.exe` 按 GBK 读取，中文注释被打乱成命令（`'需要，运行' is not recognized`）。
-已改为纯 ASCII 并 `chcp 65001`。
-
-**「扫码配对」按钮不会扫码**
-
-按钮只切换出一个文本框，zxing 依赖写在 `build.gradle.kts` 里却从未被调用。已接入 `ScanContract`。
-
-**点「重新配对」被立刻弹回首页**
-
-`AppRoot` 的 `effective` 优先判断 `token.isBlank()`，而 `PairingScreen` 又有
-`LaunchedEffect(token) { if (token 非空) onDone() }`。刚进扫码页就被弹走。已加 `repairing` 标志。
-
-**配对失效后无法恢复**
-
-手机收到 401 时只会无限重试，表现是永远“未连接”，且“重新配对”似乎没反应
-（旧的失败循环在后台打断新尝试）。现在 401 立即停止重连、清除本地 token、自动回到扫码页。
-
-**同一个配对链接失效**
-
-配对码有效期 120 秒，超时是安全设计。但界面上没有提示，用户以为是 bug。现在窗口里有
-「换个配对码」按钮，并明确说明有效期。
-
-**两个 `LinkOK.exe` 抢端口**
-
-第二个实例启动失败并显示「已停止（代码 2）」，用户不知道是“已经有一个在跑”。
-已加单实例互斥体，第二个会明确提示。端口被占用时也会给出 `taskkill` 命令和换端口方案。
-
-**Hub 启动时二维码窗口弹不出来**
-
-`banner()` 在 helper 还没 ready 时就调用 `showQr`，请求被丢弃。现在记住待显示的 payload，
-helper ready 后补弹。
-
-**配对指纹在所有机器上相同**
-
-未配对时 `fingerprintOf('')` 返回空字符串的 SHA-256，**每台机器都一样**，
-UDP 发现会认错 Hub。改用持久化的 `instanceId`（并在配对、吊销时保留）。
-
-**helper 在发出 `ready` 前就退出**
-
-临时目录硬回退到 `%TEMP%\LinkOK`，不可写时抛 `UnauthorizedAccessException`。
-Hub 只能看到 `exited unexpectedly (4294967295)` 无限重启。现在按
-`LINKOK_HELPER_TMP` → `<dataDir>\tmp` → `%LOCALAPPDATA%\LinkOK\tmp` → `%TEMP%\LinkOK`
-依次探测（真实写测试），全失败时抛出**带指引的**异常。Hub 也改为降级到慢速重试而非永久放弃。
-
-**配对链接无法从外部获取**
-
-GUI 版没有控制台，配对链接只存在于窗口文本框里。现在同时写入日志文件，便于排查和脚本化。
-
-### 新增
-
-- **首页显示最近一次剪贴板同步**：方向、文本预览、字符数，可关闭。剪贴板同步原本完全透明，
-  用户无法确认“刚才那段文字到底同步过去没有”。
-- **`GET /api/clipboard`**：Hub 端记录最近 50 条剪贴板同步（只留预览，不留全文——剪贴板可能是密码）。
-- **首页无障碍提醒条**：无障碍未开启时提示“手机复制的内容还不会同步到电脑”，可跳转设置、可关闭。
-  无障碍是「手机复制 → 电脑」的唯一路径，没开时那条链路是断的，但之前首页毫无提示。
-- **`linkok://pair?...` 深链**：可以直接点开链接配对，不用手敲 74 个字符。
-- **系统返回键处理**：设置页/配对页返回到首页，首页才退出 App。
-- **`GET /api/state` 的 `delivery` 诊断字段**：`queued` / `awaitingResultId` / `awaitingSinceMs`，
-  下次“手机没收到”时能一眼看出卡在「没发出」「发了没回执」还是「回执了但落盘失败」。
-- **版本号纪律**：`versionCode` 每次构建自动递增，`versionName` 形如 `0.2-1125-2214`，
-  配对页和设置页都显示版本与构建时间。
-
-### 变更
-
-- PC 原生桥改用 **C# / .NET Framework 4.8**，用 Windows 自带的 `csc.exe` 编译，
-  不需要 .NET SDK。决策与代价见 [ADR 0004](docs/adr/0004-csharp-helper-on-net-framework.md)。
-- Hub 的 PC Capture 队列移到 `Hub.pendingOutbound`，断线期间产生的截图会在重连后按序重放，
-  不再随 Link 对象一起丢失。
-- `scripts/env.ps1` 不再硬编码工具链绝对路径，改为按
-  `LINKOK_TOOLCHAIN` → `.toolchain/` → `~/.linkok-toolchain` 自动探测；
-  `adb` 同样改为自动查找。找不到工具链时只警告，不影响只跑 Hub。
-
-### 已知问题
-
-- **Windows 通知依赖托盘图标**。非交互桌面会话下 `Shell_NotifyIcon` 失败（win32=5），
-  通知随之失效。剪贴板与截图监听不受影响。
-- **深链在部分 MIUI 版本上被后台启动限制拦截**。手动点击链接正常，`adb am start` 可能被拒。
-- **`adb shell input text` 无法输入 URL**：会吞掉 `://?&=` 并把字符顺序打乱
-  （实测 `linkok://pair?...` 变成 `inklokpairhost96885`）。这是 adb 的机制限制，
-  所以**配对请用扫码或深链**，不要手打。
-
----
-
-## [0.1.0] — 2026-11-25
-
-首个可运行版本。
-
-### 新增
-
-- 电脑端 Node Hub：HTTP + WebSocket（手写 RFC 6455）、二维码配对、长期 Token、
-  JSON 索引历史、保留期清理、Echo 抑制、断线重放
-- 电脑端 C# 原生桥：剪贴板图片/文本监听、截图目录监听、托盘、二维码窗口、Windows 通知
-- 电脑端设置页：零依赖静态单页，Material 3，四分区（概览/历史/设备/设置）
-- 手机端：Kotlin + Compose + Material 3，前台服务、Stash（保存/丢弃/批量）、
-  无障碍剪贴板同步、快捷设置磁贴、开机自启
-- 文档：[SPEC](docs/SPEC.md)、[PROTOCOL](docs/PROTOCOL.md)、[术语表](CONTEXT.md)、
-  4 份 [ADR](docs/adr/)
-
-### 验证
-
-- Hub：186 项单元测试通过
-- APK：构建 → 安装 → 启动 → 渲染，真机零崩溃
-- 端到端：电脑剪贴板图片 → C# 解码 → 落盘 → 索引 → 可回取；
-  手机 JPEG 截图 → 转码 PNG → WS 上行 → Hub 接受
+- 电脑端：[CHANGELOG-PC.md](CHANGELOG-PC.md)
+- 手机 App：[CHANGELOG-ANDROID.md](CHANGELOG-ANDROID.md)

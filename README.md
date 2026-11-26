@@ -9,13 +9,19 @@
 - **Windows 通知**：可分类关闭。
 
 设计与协议的完整定义见 [docs/SPEC.md](docs/SPEC.md)；术语以 [CONTEXT.md](CONTEXT.md) 为准。
-改了什么、修了什么，见 **[CHANGELOG.md](CHANGELOG.md)**。
+改了什么、修了什么，见 **[CHANGELOG.md](CHANGELOG.md)**（索引页）。
 
-> **版本怎么看**：手机 App 的**配对页底部**和**设置页底部**会显示形如
-> `LinkOK 0.2-1125-2222 · 构建 1125-2222` 的版本串。
-> `1125-2222` 是构建时间（11 月 25 日 22:22），每次构建都不同——
-> 用它确认手机上装的到底是不是最新那一个。
-> 电脑端启动后访问 `http://127.0.0.1:8787/health` 可看到 Hub 版本。
+> **两端版本独立**：
+> - **电脑端**版本在 [`version.config`](version.config)，变更记录见 [CHANGELOG-PC.md](CHANGELOG-PC.md)；
+>   发版 `.\scripts\release-pc.ps1 -Minor|-Patch "标题"`。运行时访问
+>   `http://127.0.0.1:8787/health` 可看到 Hub 版本。
+> - **手机 App** 版本在 [`android/version.config`](android/version.config)，变更记录见
+>   [CHANGELOG-ANDROID.md](CHANGELOG-ANDROID.md)；发版
+>   `.\scripts\release-android.ps1 -Minor|-Patch "标题"`（加 `-Install` 会顺带构建并装到手机）。
+>
+> 版本规则统一为 `0.MINOR.PATCH`：MINOR = 功能变更/重大修复，PATCH = 小修复。
+> APK 的版本串形如 `0.3.2-1126-1030-debug`（语义版本 + 构建时间），
+> 在 App 的**欢迎页 / 配对页 / 设置页底部**可看到，用来确认装的是哪一次构建。
 
 > **测试情况**：目前**仅在 Android 13 的小米 M2012K11AC（Redmi K50）与 Windows 11 上实测过**。
 > `minSdk` 设为 29（Android 10），其他机型理论上可用，但未经验证。
