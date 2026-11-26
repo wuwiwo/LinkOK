@@ -1,30 +1,46 @@
 package com.linkok.app.ui
 
-import android.content.Context
+import android.Manifest
+import android.content.pm.PackageManager
+import android.util.Size
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.ContentPaste
+import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.layout.Row
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,22 +48,30 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
-import androidx.activity.compose.rememberLauncherForActivityResult
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 配对引导。
+ * 配对页。
  *
- * 两条路径：
- * 1. **扫码**（主路径，SPEC §5.5）—— 用 zxing 打开相机扫电脑上的二维码。
- * 2. **粘贴链接**（降级）—— 相机权限被拒、光线太差、或二维码显示在别的屏幕上时用。
+ * 版式参考了常见的桌面端远控 App：标题 + 一行说明 + **内嵌相机取景框**（四角标记）
+ * + 「从相册识别」+ 「粘贴配对链接」。
  *
- * 两条路径最终都产出同一个 `linkok://pair?...` 字符串，交给 [LinkViewModel.pairFromQr]。
+ * 为什么不用 zxing 的 ScanContract：它会弹出一个全屏 Activity，
+ * 无法做成页内取景框，也无法在同一页里同时给出"粘贴"这条降级路径。
+ * 现在预览交给 CameraX，解码仍用 zxing 的 core（Reader）。
  */
 @Composable
 fun PairingScreen(
@@ -58,21 +82,36 @@ fun PairingScreen(
     onRequestPermissions: () -> Unit,
 ) {
     val context = LocalContext.current
-    var manual by remember { mutableStateOf("") }
-    var showManual by remember { mutableStateOf(false) }
+    val lifecycleOwner = LocalLifecycleOwner.current
     val busy by vm.busy.collectAsStateWithLifecycle()
     val config by vm.config.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
 
-    // 配对失败必须**看得见**。
-    //
-    // 原先这条链路是断的：LinkViewModel 把错误写进 _message，靠 Snackbar 显示，
-    // 而 PairingScreen 里根本没有 SnackbarHost —— 于是"无效的二维码"、
-    // "配对失败"这些话全部被静默丢弃，用户看到的就是"点了没反应也没提示"。
-    //
-    // 现在双保险：Snackbar + 页面内常驻的错误文字（Snackbar 会消失，文字不会）。
     val snackbar = remember { SnackbarHostState() }
     var lastError by remember { mutableStateOf<String?>(null) }
+    var showManual by remember { mutableStateOf(false) }
+    var manual by remember { mutableStateOf("") }
+
+    // 相机权限
+    var hasCamera by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasCamera = granted
+        if (!granted) {
+            lastError = "未授权相机。可以点「从相册识别」或「粘贴配对链接」。"
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!hasCamera) permissionLauncher.launch(Manifest.permission.CAMERA)
+    }
+
     LaunchedEffect(message) {
         message?.let {
             lastError = it
@@ -81,165 +120,318 @@ fun PairingScreen(
         }
     }
 
-    // 配对成功后自动进入主界面。
     LaunchedEffect(config.token) {
         if (config.token.isNotBlank()) onDone()
     }
 
-    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
-        val contents = result.contents
-        if (contents.isNullOrBlank()) {
-            // 用户取消扫描：什么都不做，不要当成错误。
-            return@rememberLauncherForActivityResult
+    // 从相册识别
+    val pickImage = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val text = QrDecoder.decodeFromUri(context, uri)
+        if (text.isNullOrBlank()) {
+            lastError = "这张图片里没有识别到二维码。"
+        } else if (!text.trim().startsWith("linkok://", ignoreCase = true)) {
+            lastError = "识别到的不是 LinkOK 配对二维码。"
+        } else {
+            lastError = null
+            vm.pairFromQr(text.trim())
         }
-        vm.pairFromQr(contents)
     }
 
-    Scaffold(
-        snackbarHost = { SnackbarHost(snackbar) },
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Text(
-                text = "连接你的电脑",
-                style = MaterialTheme.typography.headlineSmall,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "在电脑的控制台窗口里找到配对码，然后扫描它旁边的链接二维码。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(32.dp))
+    // 一次只处理一帧，避免解码把主线程拖死。
+    val busyDecode = remember { AtomicBoolean(false) }
 
-            Button(
-                onClick = {
-                    onRequestPermissions()
-                    val options = ScanOptions().apply {
-                        setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                        setPrompt("对准电脑上的二维码")
-                        setBeepEnabled(false)
-                        setOrientationLocked(false)
-                        // 默认用 zxing 自带的 CaptureActivity，不需要额外声明 Activity。
+    Surface(color = MaterialTheme.colorScheme.surface) {
+        Box(Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp),
+            ) {
+                Spacer(Modifier.height(8.dp))
+
+                // 返回（仅在已配对、允许跳过时出现）
+                if (canSkip) {
+                    IconButton(onClick = onCancel, modifier = Modifier.size(40.dp)) {
+                        Icon(
+                            Icons.AutoMirrored.Outlined.ArrowBack,
+                            contentDescription = "返回",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                        )
                     }
-                    runCatching { scanLauncher.launch(options) }
-                        .onFailure { showManual = true }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("扫码配对") }
+                    Spacer(Modifier.height(4.dp))
+                }
 
-            if (lastError != null && config.token.isBlank() && !busy) {
-                Spacer(Modifier.height(12.dp))
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth(),
+                Text(
+                    text = "扫码配对电脑",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "不用注册任何账号，配对信息只在你的局域网内传递",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(16.dp))
+
+                // ── 取景框 ──
+                //
+                // 高度用 aspectRatio 而不是写死 dp：写死 400dp 在小屏/大字体的
+                // 设备上会把下面的说明和按钮挤出屏幕。
+                //
+                // clip(RoundedCornerShape) 不能省：PreviewView 是原生 View，
+                // 它会按自己的测量尺寸铺满并溢出父容器（实测盖住了上方副标题）。
+                // 圆角背景只是画在下面，不裁剪子 View。
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(0.85f)
+                        .clip(RoundedCornerShape(28.dp))
+                        .background(Color(0xFF111111)),
                 ) {
-                    Row(
-                        modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                    if (hasCamera) {
+                        AndroidView(
+                            factory = { ctx ->
+                                PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
+                            },
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(2.dp),
+                            update = { previewView ->
+                                bindCamera(
+                                    context = context,
+                                    lifecycleOwner = lifecycleOwner,
+                                    previewView = previewView,
+                                    busyDecode = busyDecode,
+                                    onDecoded = { text ->
+                                        if (text.trim().startsWith("linkok://", ignoreCase = true)) {
+                                            vm.pairFromQr(text.trim())
+                                        } else {
+                                            lastError = "扫到的不是 LinkOK 配对二维码。"
+                                        }
+                                    },
+                                )
+                            },
+                        )
+                        ViewfinderCorners()
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            Text(
+                                "需要相机权限才能扫码",
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodyLarge,
+                                textAlign = TextAlign.Center,
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
+                                Text("授予相机权限")
+                            }
+                        }
+                    }
+
+                    // 右下角：从相册识别
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.55f),
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(12.dp),
+                    ) {
+                        TextButton(onClick = { pickImage.launch("image/*") }) {
+                            Icon(
+                                Icons.Outlined.PhotoLibrary,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.size(6.dp))
+                            Text("从相册识别", color = Color.White)
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    text = "对准电脑上 LinkOK 窗口显示的配对二维码",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Spacer(Modifier.height(12.dp))
+                // 粘贴配对链接
+                TextButton(
+                    onClick = { showManual = !showManual },
+                    modifier = Modifier.align(Alignment.CenterHorizontally),
+                ) {
+                    Icon(
+                        Icons.Outlined.ContentPaste,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.size(6.dp))
+                    Text("粘贴配对链接")
+                }
+
+                if (showManual) {
+                    Spacer(Modifier.height(8.dp))
+                    androidx.compose.material3.OutlinedTextField(
+                        value = manual,
+                        onValueChange = { manual = it },
+                        label = { Text("配对链接") },
+                        placeholder = { Text("linkok://pair?host=…&port=…&code=…") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    androidx.compose.foundation.layout.Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        androidx.compose.material3.OutlinedButton(
+                            onClick = {
+                                val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                    as android.content.ClipboardManager
+                                val text = runCatching {
+                                    cm.primaryClip?.takeIf { it.itemCount > 0 }
+                                        ?.getItemAt(0)?.coerceToText(context)?.toString()
+                                }.getOrNull()
+                                if (text.isNullOrBlank()) {
+                                    lastError = "剪贴板是空的。先在电脑窗口点「换个配对码」。"
+                                } else {
+                                    manual = text.trim()
+                                    lastError = null
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) { Text("从剪贴板粘贴") }
+
+                        Button(
+                            onClick = { vm.pairFromQr(manual.trim()) },
+                            enabled = manual.isNotBlank() && !busy,
+                            modifier = Modifier.weight(1f),
+                        ) { Text(if (busy) "配对中…" else "确认配对") }
+                    }
+                }
+
+                if (lastError != null && !busy) {
+                    Spacer(Modifier.height(12.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(
                             text = lastError ?: "",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.padding(12.dp),
                         )
-                        IconButton(onClick = { lastError = null }) {
-                            Icon(
-                                Icons.Outlined.Close,
-                                contentDescription = "关闭提示",
-                                tint = MaterialTheme.colorScheme.onErrorContainer,
-                            )
-                        }
                     }
                 }
-            }
 
-            Spacer(Modifier.height(8.dp))
-            TextButton(onClick = { showManual = !showManual }) {
-                Text(if (showManual) "收起手动输入" else "扫码不方便？粘贴配对链接")
-            }
-
-            if (showManual) {
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = manual,
-                    onValueChange = { manual = it },
-                    label = { Text("配对链接") },
-                    placeholder = { Text("linkok://pair?host=…&port=…&code=…") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = false,
-                    minLines = 2,
-                )
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    // 从剪贴板粘贴。
-                    //
-                    // 为什么必须有：手打这个链接几乎不可能成功 —— 输入法会把
-                    // "://"、"?"、"&"、"=" 吞掉或错位（实测 linkok://pair?...
-                    // 会变成 inklokpairhost96885）。电脑端的「复制配对链接」按钮
-                    // 把链接放进剪贴板，这里一键读出来即可，不经过键盘。
-                    OutlinedButton(
-                        onClick = {
-                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
-                                as android.content.ClipboardManager
-                            val text = runCatching {
-                                cm.primaryClip?.takeIf { it.itemCount > 0 }
-                                    ?.getItemAt(0)?.coerceToText(context)?.toString()
-                            }.getOrNull()
-                            if (text.isNullOrBlank()) {
-                                lastError = "剪贴板是空的。先在电脑窗口点「换个配对码」，再回到这里粘贴。"
-                            } else if (!text.trim().startsWith("linkok://", ignoreCase = true)) {
-                                lastError = "剪贴板里的内容不是配对链接。请先在电脑窗口点「换个配对码」。"
-                            } else {
-                                manual = text.trim()
-                                lastError = null
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                    ) { Text("从剪贴板粘贴") }
-
-                    Button(
-                        onClick = { vm.pairFromQr(manual.trim()) },
-                        enabled = manual.isNotBlank() && !busy,
-                        modifier = Modifier.weight(1f),
-                    ) { Text(if (busy) "配对中…" else "确认配对") }
-                }
-            }
-
-            if (busy) {
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(16.dp))
                 Text(
-                    "正在连接电脑…",
+                    text = "LinkOK ${com.linkok.app.BuildConfig.VERSION_NAME} · 构建 ${com.linkok.app.BuildConfig.BUILD_TIME}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.align(Alignment.CenterHorizontally),
                 )
-            }
-
-            if (canSkip) {
                 Spacer(Modifier.height(16.dp))
-                OutlinedButton(onClick = onCancel) { Text("取消") }
             }
 
-            // 配对页也显示版本：用户最容易卡在这一页，
-            // 如果版本只在设置页，就无从确认当前装的是哪一版。
-            Spacer(Modifier.height(32.dp))
-            Text(
-                text = "LinkOK ${com.linkok.app.BuildConfig.VERSION_NAME} · 构建 ${com.linkok.app.BuildConfig.BUILD_TIME}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            SnackbarHost(
+                hostState = snackbar,
+                modifier = Modifier.align(Alignment.BottomCenter),
             )
         }
     }
+}
+
+/** 取景框四角标记。 */
+@Composable
+private fun ViewfinderCorners() {
+    Canvas(Modifier.fillMaxSize()) {
+        val inset = size.minDimension * 0.14f
+        val len = size.minDimension * 0.12f
+        val stroke = 3.dp.toPx()
+        val color = Color.White
+
+        // 左上
+        drawLine(color, Offset(inset, inset), Offset(inset + len, inset), stroke, StrokeCap.Round)
+        drawLine(color, Offset(inset, inset), Offset(inset, inset + len), stroke, StrokeCap.Round)
+        // 右上
+        drawLine(color, Offset(size.width - inset, inset), Offset(size.width - inset - len, inset), stroke, StrokeCap.Round)
+        drawLine(color, Offset(size.width - inset, inset), Offset(size.width - inset, inset + len), stroke, StrokeCap.Round)
+        // 左下
+        drawLine(color, Offset(inset, size.height - inset), Offset(inset + len, size.height - inset), stroke, StrokeCap.Round)
+        drawLine(color, Offset(inset, size.height - inset), Offset(inset, size.height - inset - len), stroke, StrokeCap.Round)
+        // 右下
+        drawLine(color, Offset(size.width - inset, size.height - inset), Offset(size.width - inset - len, size.height - inset), stroke, StrokeCap.Round)
+        drawLine(color, Offset(size.width - inset, size.height - inset), Offset(size.width - inset, size.height - inset - len), stroke, StrokeCap.Round)
+    }
+}
+
+/**
+ * 绑定 CameraX 预览 + 分析。
+ *
+ * 用 DisposableEffect 的作用域在这里拿不到，所以用一个可幂等的绑定函数：
+ * 每次 update 都可能调用，重复 unbindAll 再 bind 是幂等的。
+ */
+private fun bindCamera(
+    context: android.content.Context,
+    lifecycleOwner: androidx.lifecycle.LifecycleOwner,
+    previewView: PreviewView,
+    busyDecode: AtomicBoolean,
+    onDecoded: (String) -> Unit,
+) {
+    val providerFuture = ProcessCameraProvider.getInstance(context)
+    providerFuture.addListener({
+        val provider = runCatching { providerFuture.get() }.getOrNull() ?: return@addListener
+
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView.surfaceProvider)
+        }
+
+        val analysis = ImageAnalysis.Builder()
+            .setTargetResolution(Size(1280, 720))
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+
+        val executor = Executors.newSingleThreadExecutor()
+        analysis.setAnalyzer(executor) { imageProxy: ImageProxy ->
+            if (!busyDecode.compareAndSet(false, true)) {
+                imageProxy.close()
+                return@setAnalyzer
+            }
+            try {
+                val text = QrDecoder.decodeFromImageProxy(imageProxy)
+                if (!text.isNullOrBlank()) onDecoded(text)
+            } finally {
+                busyDecode.set(false)
+                imageProxy.close()
+            }
+        }
+
+        runCatching {
+            provider.unbindAll()
+            provider.bindToLifecycle(
+                lifecycleOwner,
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                preview,
+                analysis,
+            )
+        }
+    }, ContextCompat.getMainExecutor(context))
 }

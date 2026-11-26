@@ -101,21 +101,26 @@ function Invoke-Captured {
 
 function Invoke-Gradle {
     param([string[]] $ArgumentList, [string] $WorkingDirectory = (Join-Path $Root 'android'))
-    Invoke-Captured -FilePath $Gradle -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory
+    # 显式用 $script: 前缀。函数体里裸写 $Gradle 在某些 dot-source 场景下
+    # 会解析成空字符串，然后报"无法绑定到 FilePath，因为它是空字符串"。
+    if (-not $script:Gradle) {
+        throw '未找到 Gradle。请设置 LINKOK_TOOLCHAIN 指向包含 gradle-8.7 的工具链目录。'
+    }
+    Invoke-Captured -FilePath $script:Gradle -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory
 }
 
 # 编译 C# helper。引用路径含空格，/reference: 参数必须带引号，
 # 否则 csc 会拆开路径并报 CS2005（已踩过）。
 function Build-Helper {
-    param([string] $SourceDir = (Join-Path $Root 'pc\helper'))
+    param([string] $SourceDir = (Join-Path $script:Root 'pc\helper'))
     $cs = Get-ChildItem $SourceDir -Filter *.cs -Recurse | ForEach-Object { $_.FullName }
     $args = @('/nologo', '/target:winexe', '/optimize+',
               ('/out:"{0}"' -f (Join-Path $SourceDir 'linkok-helper.exe')),
-              ('/reference:"{0}\System.Windows.Forms.dll"' -f $FrameworkDir),
-              ('/reference:"{0}\System.Drawing.dll"' -f $FrameworkDir),
-              ('/reference:"{0}\System.dll"' -f $FrameworkDir),
-              ('/reference:"{0}\System.Core.dll"' -f $FrameworkDir)) + $cs
-    Invoke-Captured -FilePath $Csc -ArgumentList $args -WorkingDirectory $SourceDir
+              ('/reference:"{0}\System.Windows.Forms.dll"' -f $script:FrameworkDir),
+              ('/reference:"{0}\System.Drawing.dll"' -f $script:FrameworkDir),
+              ('/reference:"{0}\System.dll"' -f $script:FrameworkDir),
+              ('/reference:"{0}\System.Core.dll"' -f $script:FrameworkDir)) + $cs
+    Invoke-Captured -FilePath $script:Csc -ArgumentList $args -WorkingDirectory $SourceDir
 }
 
 # 编译双击启动器 LinkOK.exe（WinForms 图形界面）。
@@ -136,12 +141,12 @@ function Build-Launcher {
     $args = @('/nologo', '/target:winexe', '/optimize+',
               '/main:Launcher',
               ('/out:"{0}"' -f $OutFile),
-              ('/reference:"{0}\System.dll"' -f $FrameworkDir),
-              ('/reference:"{0}\System.Core.dll"' -f $FrameworkDir),
-              ('/reference:"{0}\System.Drawing.dll"' -f $FrameworkDir),
-              ('/reference:"{0}\System.Windows.Forms.dll"' -f $FrameworkDir)) +
+              ('/reference:"{0}\System.dll"' -f $script:FrameworkDir),
+              ('/reference:"{0}\System.Core.dll"' -f $script:FrameworkDir),
+              ('/reference:"{0}\System.Drawing.dll"' -f $script:FrameworkDir),
+              ('/reference:"{0}\System.Windows.Forms.dll"' -f $script:FrameworkDir)) +
               ($compile | ForEach-Object { '"{0}"' -f $_ })
-    $r = Invoke-Captured -FilePath $Csc -ArgumentList $args -WorkingDirectory $Root
+    $r = Invoke-Captured -FilePath $script:Csc -ArgumentList $args -WorkingDirectory $script:Root
     $r | Add-Member -NotePropertyName BuiltPath -NotePropertyValue $OutFile -PassThru
 }
 

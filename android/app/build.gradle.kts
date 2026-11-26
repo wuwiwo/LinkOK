@@ -118,8 +118,18 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // QR 扫描：zxing（第三方库，ghost 版无需 Google Play Services）
-    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // CameraX：配对页内嵌相机预览（参考图那种样式）。
+    // zxing 的 ScanContract 会弹一个全屏 Activity，无法做成"页内取景框"，
+    // 所以预览交给 CameraX，解码仍用 zxing 的 core。
+    val cameraX = "1.3.4"
+    implementation("androidx.camera:camera-core:$cameraX")
+    implementation("androidx.camera:camera-camera2:$cameraX")
+    implementation("androidx.camera:camera-lifecycle:$cameraX")
+    implementation("androidx.camera:camera-view:$cameraX")
+    // 只保留 zxing 的 core（解码器）。zxing-android-embedded 那个
+    // 封装层已不再需要 —— 它只能弹全屏 Activity，且会额外带入
+    // appcompat 相关依赖。
+    implementation("com.google.zxing:core:3.5.3")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 
